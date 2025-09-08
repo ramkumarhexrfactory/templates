@@ -1,0 +1,428 @@
+pipeline {
+    agent {
+        label 'remote-server-agent'
+    }
+    triggers {
+        GenericTrigger(
+            genericVariables: [
+                [key: 'ref', value: '$.ref'],
+                [key: 'commit', value: '$.after'],
+                [key: 'author', value: '$.commits[0].author.name']
+            ],
+            causeString: 'Triggered by commit on $ref by $author',
+            token: 'dwinzoOrgDwinzoBackend',
+            printContributedVariables: true,
+            printPostContent: true,
+            regexpFilterText: '$ref',
+            regexpFilterExpression: '^refs/heads/Bkd_9901$'
+        )
+    }
+    environment {
+        GIT_CREDENTIALS     = credentials('ramkumarp')
+        DOCKER_COMPOSE      = 'docker-compose'
+        APP_NAME            = 'aalai_backend_demo'
+        MAIN_CONTAINER      = 'aalai_demo_api_end'
+        SONAR_HOST_URL      = 'http://185.100.212.76:12345'
+        SONAR_TOKEN         = credentials('sonarqube-token')
+        SMTP_CREDENTIALS    = credentials('smtp-credentials-gmail')
+    }
+    stages {
+        stage('Source') {
+            steps {
+                script {
+                    cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+                    powershell 'Write-Host "Starting source stage..."; dir'
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: '*/Bkd_9901']],
+                        userRemoteConfigs: [[
+                            url: 'http://185.100.212.76:7778/Dwinzo/Dwinzo-Backend.git',
+                            credentialsId: env.GIT_CREDENTIALS
+                        ]]
+                    ])
+                    powershell 'Write-Host "Source checkout completed successfully"; dir'
+                }
+            }
+        }
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Building Docker images..."
+                        docker-compose build --no-cache
+                        docker images
+                        dir
+                    '''
+                }
+            }
+        }
+        stage('Image Scan with Trivy') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Starting Trivy scan on ${env.MAIN_CONTAINER}:latest..."
+                        if (-not (Test-Path ".\\trivy-reports")) {
+                            New-Item -ItemType Directory -Path ".\\trivy-reports" | Out-Null
+                        }
+                        $image = "${env.MAIN_CONTAINER}:latest"
+                        $imageExists = docker images --format "{{.Repository}}:{{.Tag}}" | Select-String -Pattern "^$image$"
+                        if (-not $imageExists) {
+                            Write-Host "Image $image does not exist. Skipping Trivy scan."
+                            exit 0
+                        }
+                        Write-Host "Scanning image: $image"
+                        C:\\Tools\\Trivy\\trivy.exe image `
+                            --severity HIGH,CRITICAL `
+                            --format sarif `
+                            --output .\\trivy-reports\\$($image.Replace(":", "_")).sarif `
+                            $image
+                        if ($LASTEXITCODE -eq 1) {
+                            Write-Host "[INFO] High/Critical vulnerabilities found in $image, but build will continue."
+                        } elseif ($LASTEXITCODE -ne 0) {
+                            Write-Error "[ERROR] Trivy failed to scan $image with exit code $LASTEXITCODE"
+                        } else {
+                            Write-Host "No HIGH/CRITICAL vulnerabilities found in $image"
+                        }
+                        Write-Host "Trivy image scanning completed."
+                    '''
+                }
+            }
+        }
+        stage('Secret Scanning with Gitleaks') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Starting Gitleaks scan..."
+                        if (-not (Test-Path ".\\gitleaks-reports")) {
+                            New-Item -ItemType Directory -Path ".\\gitleaks-reports" | Out-Null
+                        }
+                        C:\\Tools\\Gitleaks\\gitleaks.exe detect `
+                            --source . `
+                            --report-format sarif `
+                            --report-path .\\gitleaks-reports\\gitleaks-report.sarif
+                        Write-Host "Gitleaks scan completed. Report saved at .\\gitleaks-reports\\gitleaks-report.sarif"
+                    '''
+                }
+            }
+        }
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Generating sonar-project.properties..."
+                        $sonarProps = @"
+sonar.projectKey=Aalai_Backend_V.0.3
+sonar.projectName=Aalai_Backend_V.0.3
+sonar.projectVersion=3.0.0
+sonar.projectDescription=This is a sample project for AALAI Backend V.0.3.
+sonar.sources=./
+sonar.language=ts
+sonar.javascript.lcov.reportPaths=coverage/lcov.info
+"@
+                        Set-Content -Path "sonar-project.properties" -Value $sonarProps
+                        Write-Host "Running SonarScanner..."
+                        sonar-scanner
+                    '''
+                }
+            }
+        }
+        stage('Software Composition Analysis (SCA)') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Starting OWASP Dependency-Check scan..."
+                        if (-not (Test-Path ".\\sca-report")) {
+                            New-Item -ItemType Directory -Path ".\\sca-report" | Out-Null
+                        }
+                        if (-not (Test-Path ".\\dependency-check")) {
+                            Write-Host "Downloading OWASP Dependency-Check v12.1.0..."
+                            Invoke-WebRequest -Uri "https://github.com/jeremylong/DependencyCheck/releases/download/v12.1.0/dependency-check-12.1.0-release.zip" -OutFile "dependency-check.zip"
+                            Expand-Archive -Path "dependency-check.zip" -DestinationPath "." -Force
+                            Remove-Item -Path "dependency-check.zip"
+                        }
+                        .\\dependency-check\\bin\\dependency-check.bat --project "AALAI Backend V.0.3" --scan "./" --format "HTML" --out ".\\sca-report" --disableAssembly
+                        Write-Host "Dependency-Check scan completed. Report at .\\sca-report\\dependency-check-report.html"
+                    '''
+                }
+            }
+        }
+    }
+   post {
+    always {
+        script {
+            // Compose the HTML email body using the enhanced template
+            def emailBody = """
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Build Notification</title>
+                <style>
+                    body {
+                        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                        line-height: 1.6;
+                        color: #17252A;
+                        background-color: #f9f9f9;
+                        margin: 0;
+                        padding: 0;
+                    }
+                    .container {
+                        max-width: 800px;
+                        margin: 20px auto;
+                        background-color: #FFFFFF;
+                        border-radius: 8px;
+                        overflow: hidden;
+                        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+                    }
+                    .header {
+                        background: linear-gradient(to right, #17252A, #2B7A78);
+                        color: #FFFFFF;
+                        padding: 20px;
+                        text-align: center;
+                    }
+                    .header h1 {
+                        margin: 0;
+                        font-size: 24px;
+                    }
+                    .header p {
+                        margin: 5px 0 0;
+                        opacity: 0.9;
+                    }
+                    .content {
+                        padding: 25px;
+                    }
+                    .status-banner {
+                        background-color: #DEF2F1;
+                        border-left: 5px solid #3AAFA9;
+                        padding: 15px;
+                        margin-bottom: 25px;
+                        border-radius: 4px;
+                    }
+                    .status-success {
+                        border-left-color: #4CAF50;
+                        background-color: #E8F5E9;
+                    }
+                    .status-failure {
+                        border-left-color: #F44336;
+                        background-color: #FFEBEE;
+                    }
+                    .status-unstable {
+                        border-left-color: #FF9800;
+                        background-color: #FFF3E0;
+                    }
+                    .section {
+                        margin-bottom: 25px;
+                    }
+                    .section-title {
+                        color: #2B7A78;
+                        border-bottom: 2px solid #DEF2F1;
+                        padding-bottom: 8px;
+                        margin-top: 0;
+                        font-size: 18px;
+                    }
+                    .info-grid {
+                        display: grid;
+                        grid-template-columns: 1fr 1fr;
+                        gap: 15px;
+                    }
+                    .info-item {
+                        margin-bottom: 10px;
+                    }
+                    .info-label {
+                        font-weight: bold;
+                        color: #17252A;
+                        margin-bottom: 5px;
+                    }
+                    .scan-results {
+                        display: grid;
+                        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                        gap: 15px;
+                        margin-top: 20px;
+                    }
+                    .scan-card {
+                        background-color: #F5F5F5;
+                        border-radius: 6px;
+                        padding: 15px;
+                        text-align: center;
+                    }
+                    .scan-card h3 {
+                        margin-top: 0;
+                        color: #2B7A78;
+                        font-size: 16px;
+                    }
+                    .scan-status {
+                        display: inline-block;
+                        padding: 4px 10px;
+                        border-radius: 20px;
+                        font-size: 12px;
+                        font-weight: bold;
+                        margin-top: 10px;
+                    }
+                    .status-pass {
+                        background-color: #E8F5E9;
+                        color: #4CAF50;
+                    }
+                    .status-fail {
+                        background-color: #FFEBEE;
+                        color: #F44336;
+                    }
+                    .status-warn {
+                        background-color: #FFF3E0;
+                        color: #FF9800;
+                    }
+                    .footer {
+                        background-color: #17252A;
+                        color: #FFFFFF;
+                        padding: 15px;
+                        text-align: center;
+                        font-size: 12px;
+                    }
+                    .button {
+                        display: inline-block;
+                        background-color: #3AAFA9;
+                        color: white;
+                        padding: 10px 20px;
+                        text-decoration: none;
+                        border-radius: 4px;
+                        margin-top: 10px;
+                        font-weight: bold;
+                    }
+                    .artifact-list {
+                        background-color: #F9F9F9;
+                        border-radius: 4px;
+                        padding: 15px;
+                        margin-top: 15px;
+                    }
+                    .artifact-item {
+                        margin-bottom: 8px;
+                        display: flex;
+                        align-items: center;
+                    }
+                    .artifact-icon {
+                        margin-right: 10px;
+                        color: #2B7A78;
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <h1>🛡️ Aalai Backend V.0.3 Security Scan</h1>
+                        <p>Build #${env.BUILD_NUMBER} | ${new Date().format("MMM dd, yyyy - HH:mm")}</p>
+                    </div>
+                    
+                    <div class="content">
+                        <div class="status-banner ${currentBuild.result ? currentBuild.result.toLowerCase() : 'status-success'}">
+                            <h2 style="margin: 0;">Build Status: ${currentBuild.result ?: 'SUCCESS'}</h2>
+                            <p style="margin: 10px 0 0;">
+                                Triggered by commit on ${ref} by ${author}
+                                ${commit ? '<br>Commit: ' + commit.substring(0, 7) : ''}
+                            </p>
+                        </div>
+                        
+                        <div class="section">
+                            <h3 class="section-title">Build Information</h3>
+                            <div class="info-grid">
+                                <div class="info-item">
+                                    <div class="info-label">Project Name</div>
+                                    <div>Aalai Backend V.0.3</div>
+                                </div>
+                                <div class="info-item">
+                                    <div class="info-label">Build Number</div>
+                                    <div>#${env.BUILD_NUMBER}</div>
+                                </div>
+                                <div class="info-item">
+                                    <div class="info-label">Branch</div>
+                                    <div>${ref ? ref.replace('refs/heads/', '') : 'N/A'}</div>
+                                </div>
+                                <div class="info-item">
+                                    <div class="info-label">Build Duration</div>
+                                    <div>${currentBuild.durationString.replace(' and counting', '')}</div>
+                                </div>
+                                <div class="info-item">
+                                    <div class="info-label">Built On</div>
+                                    <div>remote-server-agent</div>
+                                </div>
+                                <div class="info-item">
+                                    <div class="info-label">Jenkins URL</div>
+                                    <div><a href="${env.BUILD_URL}" style="color: #3AAFA9;">View Build</a></div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="section">
+                            <h3 class="section-title">Security Scan Results</h3>
+                            <div class="scan-results">
+                                <div class="scan-card">
+                                    <h3>🔍 Trivy Image Scan</h3>
+                                    <p>Container vulnerability assessment</p>
+                                    <span class="scan-status status-pass">Completed</span>
+                                </div>
+                                <div class="scan-card">
+                                    <h3>🔑 Gitleaks Secret Scan</h3>
+                                    <p>Detected secrets in codebase</p>
+                                    <span class="scan-status status-pass">Completed</span>
+                                </div>
+                                <div class="scan-card">
+                                    <h3>📊 SonarQube Analysis</h3>
+                                    <p>Code quality & security inspection</p>
+                                    <span class="scan-status status-pass">Completed</span>
+                                </div>
+                                <div class="scan-card">
+                                    <h3>🧩 Dependency Check</h3>
+                                    <p>Software composition analysis</p>
+                                    <span class="scan-status status-pass">Completed</span>
+                                </div>
+                            </div>
+                            
+                            <div style="margin-top: 20px;">
+                                <a href="${env.BUILD_URL}" class="button">View Full Build Details</a>
+                            </div>
+                        </div>
+                        
+                        <div class="section">
+                            <h3 class="section-title">Available Artifacts</h3>
+                            <div class="artifact-list">
+                                <div class="artifact-item">
+                                    <span class="artifact-icon">📄</span>
+                                    <span>SCA Report (Dependency-Check): dependency-check-report.html</span>
+                                </div>
+                                <div class="artifact-item">
+                                    <span class="artifact-icon">📄</span>
+                                    <span>Secret Scan Report: gitleaks-report.sarif</span>
+                                </div>
+                                <div class="artifact-item">
+                                    <span class="artifact-icon">📄</span>
+                                    <span>Container Scan Reports: trivy-reports/*.sarif</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="footer">
+                        <p>This is an automated message from Jenkins CI/CD System. Please do not reply to this email.</p>
+                        <p>© ${new Date().format("yyyy")} HexaFactory - All Rights Reserved</p>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            emailext(
+                subject: "🛡️ Aalai Backend V.0.3 Security Scan - Build ${env.BUILD_NUMBER} | Status: ${currentBuild.result ?: 'SUCCESS'}",
+                body: emailBody,
+                to: "marikannan@hexrfactory.com, rithish@hexrfactory.com, sabarinathan@hexrfactory.com, nivetha@hexrfactory.com, ramkumar@hexrfactory.com",
+                mimeType: 'text/html',
+                replyTo: "marikannan@hexrfactory.com",
+                from: '$SMTP_CREDENTIALS_USR',
+                attachmentsPattern: "sca-report/dependency-check-report.html, gitleaks-reports/*.sarif, trivy-reports/*.sarif"
+            )
+            archiveArtifacts artifacts: 'sca-report/dependency-check-report.html', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'gitleaks-reports/gitleaks-report.sarif', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'trivy-reports/*.sarif', allowEmptyArchive: true
+            cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+        }
+    }
+  }
+}

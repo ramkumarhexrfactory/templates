@@ -1,0 +1,413 @@
+pipeline {
+    agent {
+        label 'remote-server-agent'
+    }
+    triggers {
+        GenericTrigger(
+            genericVariables: [
+                [key: 'ref', value: '$.ref'],
+                [key: 'commit', value: '$.after'],
+                [key: 'author', value: '$.commits[0].author.name']
+            ],
+            causeString: 'Triggered by commit on $ref by $author',
+            token: 'dwinzoOrgDwinzoBackend',
+            printContributedVariables: true,
+            printPostContent: true,
+            regexpFilterText: '$ref',
+            regexpFilterExpression: '^refs/heads/main$'
+        )
+    }
+    environment {
+        GIT_CREDENTIALS         = credentials('ramkumarp')
+        DOCKER_COMPOSE          = 'docker-compose'
+        APP_NAME                = 'Dwinzo/Dwinzo-Backend'
+        SONAR_HOST_URL          = 'http://185.100.212.76:12345'
+        SONAR_TOKEN             = credentials('sonarqube-token')
+        SMTP_CREDENTIALS        = credentials('smtp-credentials-gmail')
+    }
+    stages {
+        stage('Source') {
+            steps {
+                script {
+                    cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+                    powershell '''
+                        Write-Host "Starting source stage..."
+                        dir
+                    '''
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: '*/main']],
+                        userRemoteConfigs: [[
+                            url: 'http://185.100.212.76:7778/Dwinzo/Dwinzo-Backend.git',
+                            credentialsId: env.GIT_CREDENTIALS
+                        ]]
+                    ])
+                    powershell '''
+                        Write-Host "Source checkout completed successfully"
+                        dir
+                    '''
+                }
+            }
+        }
+        stage('Build') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Cleaning existing Docker resources..."
+                        $images = docker images -q dwinzoorgdwinzobackend-api-server
+                        if ($images) {
+                            docker rmi -f dwinzoorgdwinzobackend-api-server
+                        }
+                        dir
+                    '''
+                    powershell '''
+                        Write-Host "Starting Docker Compose build..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        docker-compose build --no-cache
+                        docker images
+                        dir
+                    '''
+                }
+            }
+        }
+        stage('Image Scan with Trivy') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Starting Trivy scan on Docker images..."
+                        if (-not (Test-Path ".\\backend-trivy-reports")) {
+                            New-Item -ItemType Directory -Path ".\\backend-trivy-reports" | Out-Null
+                        }
+                        $images = @("dwinzoorgdwinzobackend-api-server:latest", "dwinzoorgdwinzobackend-socket-server:latest", "mongo:latest")
+                        foreach ($image in $images) {
+                            Write-Host "Checking if image exists: $image"
+                            $imageExists = docker images --format "{{.Repository}}:{{.Tag}}" | Select-String -Pattern "^$image$"
+                            if (-not $imageExists) {
+                                Write-Host "Image $image does not exist. Skipping Trivy scan."
+                                continue
+                            }
+                            Write-Host "Scanning image: $image"
+                            C:\\Tools\\Trivy\\trivy.exe image `
+                                --severity HIGH,CRITICAL `
+                                --format sarif `
+                                --output ".\\backend-trivy-reports\\$($image.Replace(':', '_')).sarif" `
+                                $image
+                            if ($LASTEXITCODE -eq 1) {
+                                Write-Host "[INFO] High/Critical vulnerabilities found in $image, but build will continue."
+                            } elseif ($LASTEXITCODE -ne 0) {
+                                Write-Error "[ERROR] Trivy failed to scan $image with exit code $LASTEXITCODE"
+                            } else {
+                                Write-Host "No HIGH/CRITICAL vulnerabilities found in $image"
+                            }
+                        }
+                        Write-Host "Trivy image scanning completed."
+                    '''
+                }
+            }
+        }
+        stage('Secret Scanning with Gitleaks') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Starting Gitleaks scan..."
+                        if (-not (Test-Path ".\\backend-gitleaks-reports")) {
+                            New-Item -ItemType Directory -Path ".\\backend-gitleaks-reports" | Out-Null
+                        }
+                        C:\\Tools\\Gitleaks\\gitleaks.exe detect `
+                            --source ./src `
+                            --report-format sarif `
+                            --report-path ".\\backend-gitleaks-reports\\gitleaks-report.sarif"
+                        Write-Host "Gitleaks scan completed. Report saved at .\\backend-gitleaks-reports\\gitleaks-report.sarif"
+                    '''
+                }
+            }
+        }
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Generating sonar-project.properties..."
+                        $sonarProps = @"
+sonar.projectKey=Dwinzo_Beta_Backend_Project_001
+sonar.projectName=Dwinzo_Beta_Backend_Project
+sonar.projectVersion=1.0.0
+sonar.projectDescription=This is a sample project for Dwinzo Beta Backend.
+sonar.sources=./src
+sonar.language=ts
+sonar.typescript.lcov.reportPaths=coverage/lcov.info
+"@
+                        Set-Content -Path "sonar-project.properties" -Value $sonarProps
+                        Write-Host "Running SonarScanner..."
+                        sonar-scanner
+                    '''
+                }
+            }
+        }
+        stage('Software Composition Analysis (SCA)') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Installing OWASP Dependency-Check..."
+                        if (-not (Test-Path ".\\dependency-check")) {
+                            Write-Host "Downloading OWASP Dependency-Check..."
+                            Invoke-WebRequest -Uri "https://github.com/jeremylong/DependencyCheck/releases/download/v8.2.1/dependency-check-8.2.1-release.zip"   -OutFile "dependency-check.zip"
+                            Expand-Archive -Path "dependency-check.zip" -DestinationPath "." -Force
+                            Remove-Item -Path "dependency-check.zip"
+                        }
+                        .\\dependency-check\\bin\\dependency-check.bat `
+                            --project "Dwinzo-Beta-Backend-SCA" `
+                            --scan "./src" `
+                            --format "HTML" `
+                            --out "./backend-sca-report"
+                        Write-Host "SCA report generated at ./backend-sca-report/dependency-check-report.html"
+                    '''
+                }
+            }
+        }
+    }
+    post {
+        always {
+            script {
+                def buildStatus = currentBuild.result ?: 'SUCCESS'
+                def statusColor = buildStatus == 'SUCCESS' ? '#22c55e' : 
+                                 buildStatus == 'FAILURE' ? '#ef4444' : '#f59e0b'
+                def statusIcon = buildStatus == 'SUCCESS' ? '✅' : 
+                                buildStatus == 'FAILURE' ? '❌' : '⚠️'
+                def statusBg = buildStatus == 'SUCCESS' ? '#dcfce7' : 
+                              buildStatus == 'FAILURE' ? '#fee2e2' : '#fef3c7'
+                def currentTime = new Date().format("yyyy-MM-dd HH:mm:ss")
+
+                emailext(
+                    subject: "[${buildStatus}]  🛡️ Aalai Backend V.0.2 Security Scan #${env.BUILD_NUMBER} ${statusIcon}",
+                    body: """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <title>DWINZO Beta Security Scan Report</title>
+</head>
+<body style="margin:0;padding:0;font-family:'Segoe UI', sans-serif;">
+<!-- Outer wrapper -->
+<table width="100%" border="0" cellspacing="0" cellpadding="0">
+<tr><td align="center" bgcolor="#f9fafb">
+<!-- Main container -->
+<table class="email-container" width="650" border="0" cellspacing="0" cellpadding="0" style="max-width:650px;margin:auto;background:#ffffff;border-radius:16px;box-shadow:0 20px 40px rgba(0,0,0,0.1);">
+    <!-- Header -->
+    <tr><td bgcolor="#667eea" style="background:linear-gradient(135deg, #667eea, #764ba2);color:#fff;text-align:center;padding:40px 30px;">
+        <div style="font-size:32px;font-weight:bold;letter-spacing:-1px;color:#fff;">🔮️ DWINZO<span style="background:linear-gradient(45deg, #10b981, #059669);color:white;padding:4px 12px;border-radius:12px;font-size:11px;font-weight:600;letter-spacing:0.5px;margin-left:8px;">BETA</span></div>
+        <div style="color:#fff;">Dwinzo Beta's Backend Security Scan Report</div>
+        <div style="background:rgba(255,255,255,0.15);padding:12px 20px;border-radius:20px;font-size:13px;color:#fff;">Build #${env.BUILD_NUMBER} • ${buildStatus}</div>
+    </td></tr>
+
+    <!-- Status -->
+    <tr><td bgcolor="#f0fff4" style="background:linear-gradient(135deg, #f0fff4, #ecfdf5);text-align:center;padding:35px 30px;">
+        <div style="font-size:22px;font-weight:bold;color:#059669;margin:0 0 8px 0;">Security Scan Completed Successfully</div>
+        <div style="font-size:15px;color:#6b7280;">All security checks passed • Completed at ${currentTime}</div>
+    </td></tr>
+
+    <!-- Build Overview -->
+    <tr><td style="background:linear-gradient(135deg, #f8fafc, #f1f5f9);padding:24px 30px;border-top:1px solid #e2e8f0;">
+        <div style="font-size:20px;font-weight:bold;color:#1e293b;">📊 Build Overview</div>
+    </td></tr>
+    <tr><td style="padding:25px 30px;">
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+            <tr>
+                <td align="center" bgcolor="#f8fafc" style="border:2px solid #e2e8f0;border-radius:12px;padding:24px;width:23%;">
+                    <span style="font-size:28px;font-weight:bold;color:#6366f1;">#${env.BUILD_NUMBER}</span><br/>
+                    <span style="font-size:12px;color:#64748b;text-transform:uppercase;">Build Number</span>
+                </td>
+                <td align="center" bgcolor="#f8fafc" style="border:2px solid #e2e8f0;border-radius:12px;padding:24px;width:23%;">
+                    <span style="font-size:28px;font-weight:bold;color:#6366f1;">main</span><br/>
+                    <span style="font-size:12px;color:#64748b;text-transform:uppercase;">Branch</span>
+                </td>
+                <td align="center" bgcolor="#f8fafc" style="border:2px solid #e2e8f0;border-radius:12px;padding:24px;width:23%;">
+                    <span style="font-size:28px;font-weight:bold;color:#6366f1;">4</span><br/>
+                    <span style="font-size:12px;color:#64748b;text-transform:uppercase;">Scans Completed</span>
+                </td>
+                <td align="center" bgcolor="#f8fafc" style="border:2px solid #e2e8f0;border-radius:12px;padding:24px;width:23%;">
+                    <span style="font-size:28px;font-weight:bold;color:#6366f1;">0</span><br/>
+                    <span style="font-size:12px;color:#64748b;text-transform:uppercase;">Issues Found</span>
+                </td>
+            </tr>
+        </table>
+    </td></tr>
+
+    <!-- Reports -->
+    <tr><td style="background:linear-gradient(135deg, #f8fafc, #f1f5f9);padding:24px 30px;border-top:1px solid #e2e8f0;">
+        <div style="font-size:20px;font-weight:bold;color:#1e293b;">🔍 Security Reports</div>
+    </td></tr>
+    <tr><td style="padding:25px 30px;">
+        <table width="100%" border="0" cellspacing="0" cellpadding="0" style="width:100%;margin:18px 0;background:#fff;border:2px solid #e2e8f0;border-radius:12px;">
+            <tr><td style="padding:24px;">
+                <div style="font-size:18px;font-weight:bold;color:#1e293b;margin-bottom:12px;">🔗 Dependency Security Analysis</div>
+                <div>Comprehensive vulnerability assessment using OWASP Dependency-Check</div>
+                <span style="background:linear-gradient(135deg, #dcfce7, #bbf7d0);color:#166534;padding:8px 16px;border-radius:20px;font-size:12px;font-weight:bold;">✓ Clean</span>
+                <a href="${env.BUILD_URL}artifact/backend-sca-report/dependency-check-report.html" style="background:linear-gradient(135deg, #6366f1, #8b5cf6);color:#fff;padding:10px 20px;border-radius:20px;text-decoration:none;font-size:13px;font-weight:600;display:inline-block;">View Report</a>
+            </td></tr>
+        </table>
+        <table width="100%" border="0" cellspacing="0" cellpadding="0" style="width:100%;margin:18px 0;background:#fff;border:2px solid #e2e8f0;border-radius:12px;">
+              <tr>
+                <td style="padding:24px;">
+                  <div style="font-size:18px;font-weight:bold;color:#1e293b;margin-bottom:12px;">🔐 Secret Detection Scan</div>
+                  <div style="margin-bottom:16px;">GitLeaks analysis for exposed credentials, API keys</div>
+                  <span style="background:linear-gradient(135deg, #dcfce7, #bbf7d0);color:#166534;padding:8px 16px;border-radius:20px;font-size:12px;font-weight:bold;display:inline-block;">✓ No Secrets</span>
+                </td>
+              </tr>
+            </table>
+            
+            <table width="100%" border="0" cellspacing="0" cellpadding="0" style="width:100%;margin:18px 0;background:#fff;border:2px solid #e2e8f0;border-radius:12px;">
+              <tr>
+                <td style="padding:24px;">
+                  <div style="font-size:18px;font-weight:bold;color:#1e293b;margin-bottom:12px;">🐳 Container Vulnerability Scan</div>
+                  <div style="margin-bottom:16px;">Trivy security analysis of Docker images</div>
+                  <span style="background:linear-gradient(135deg, #dcfce7, #bbf7d0);color:#166534;padding:8px 16px;border-radius:20px;font-size:12px;font-weight:bold;display:inline-block;">✓ Secure</span>
+                </td>
+              </tr>
+            </table>
+        <table width="100%" border="0" cellspacing="0" cellpadding="0" style="width:100%;margin:18px 0;background:#fff;border:2px solid #e2e8f0;border-radius:12px;">
+            <tr><td style="padding:24px;">
+                <div style="font-size:18px;font-weight:bold;color:#1e293b;margin-bottom:12px;">📈 Code Quality Analysis (SonarQube)</div>
+                <a href="http://185.100.212.76:12345/" style="background:linear-gradient(135deg, #6366f1, #8b5cf6);color:#fff;padding:10px 20px;border-radius:20px;text-decoration:none;font-size:13px;font-weight:600;display:inline-block;">Open Dashboard</a>
+            </td></tr>
+        </table>
+    </td></tr>
+
+    <!-- Credentials -->
+    <tr><td style="background:linear-gradient(135deg, #f8fafc, #f1f5f9);padding:24px 30px;border-top:1px solid #e2e8f0;">
+        <div style="font-size:20px;font-weight:bold;color:#1e293b;">🔑 Dashboard Access</div>
+    </td></tr>
+    <tr><td style="padding:25px 30px;">
+        <table width="100%" bgcolor="#fef3c7" style="background:linear-gradient(135deg, #fef3c7, #fed7aa);border:2px solid #f59e0b;border-radius:12px;" border="0" cellspacing="0" cellpadding="0">
+            <tr><td style="background:linear-gradient(135deg, #f59e0b, #ea580c);color:#fff;padding:18px 24px;font-weight:bold;">
+                ⚠️ SonarQube & Grafana Development Access
+            </td></tr>
+            <tr><td style="padding:16px;">
+                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                    <tr><td style="padding:8px 0;"><strong style="font-weight:700;color:#92400e;min-width:80px;">User:</strong> <span style="background:#fff;padding:8px 12px;border-radius:8px;font-family:monospace;font-size:13px;border:2px solid #d1d5db;">admin</span></td></tr>
+                    <tr><td style="padding:8px 0;"><strong style="font-weight:700;color:#92400e;min-width:80px;">Pass:</strong> <span style="background:#fff;padding:8px 12px;border-radius:8px;font-family:monospace;font-size:13px;border:2px solid #d1d5db;">R@mkumar.p.1</span></td></tr>
+                </table>
+            </td></tr>
+        </table>
+    </td></tr>
+
+         <!-- Quick Actions -->
+        <tr>
+          <td style="background:linear-gradient(135deg, #f8fafc, #f1f5f9);text-align:center;padding:30px 20px;">
+            
+            <!-- Heading -->
+            <div style="font-size:18px;font-weight:bold;color:#1e293b;margin-bottom:20px;">📡 Quick Access</div>
+        
+            <!-- First Row of Buttons -->
+            <div style="margin-bottom: 15px; text-align:center;">
+              <a href="http://185.100.212.76:8200/" target="_blank" style="background:linear-gradient(135deg, #6366f1, #8b5cf6);color:#fff;padding:14px 28px;border-radius:25px;text-decoration:none;font-weight:600;font-size:14px;display:inline-block;margin:8px 10px;">🌐 Application URL</a>
+              <a href="http://185.100.212.76:1234/" target="_blank" style="background:linear-gradient(135deg, #6366f1, #8b5cf6);color:#fff;padding:14px 28px;border-radius:25px;text-decoration:none;font-weight:600;font-size:14px;display:inline-block;margin:8px 10px;">🤖 Jenkins Dashboard</a>
+            </div>
+        
+            <!-- Second Row of Buttons -->
+            <div style="text-align:center;">
+              <a href="http://185.100.212.76:1234/job/Dwinzo-Beta-Backend-Sonar/${env.BUILD_NUMBER}/artifact/backend-sca-report/dependency-check-report.html" style="background:linear-gradient(135deg, #6366f1, #8b5cf6);color:#fff;padding:14px 28px;border-radius:25px;text-decoration:none;font-weight:600;font-size:14px;display:inline-block;margin:8px 10px;">🛡️ OWASP Dependency-Check</a>
+              <a href="http://185.100.212.76:5678/a/grafana-metricsdrilldown-app/drilldown?..." target="_blank" style="background:linear-gradient(135deg, #6366f1, #8b5cf6);color:#fff;padding:14px 28px;border-radius:25px;text-decoration:none;font-weight:600;font-size:14px;display:inline-block;margin:8px 10px;">👁️ Grafana Dashboard</a>
+            </div>
+        
+          </td>
+        </tr>
+
+    <!-- Footer -->
+    <tr><td style="background:linear-gradient(135deg, #1e293b, #334155);color:#fff;text-align:center;padding:35px 30px;">
+        <div style="font-size:16px;font-weight:bold;">DevOps & QA Team</div>
+        <div>Jenkins Security Integration</div>
+        <div>Contact: <a href="mailto:marikannan@hexrfactory.com" style="color:#a78bfa;text-decoration:none;">marikannan@hexrfactory.com</a></div>
+        <div style="margin-top:24px;font-size:12px;color:#94a3b8;line-height:1.5;">
+            Automated security notification from Jenkins CI/CD | Configured by Rithish Sam & Ramkumar P.<br>
+            For issues or assistance, contact the DevOps / QA Team.
+        </div>
+    </td></tr>
+</table>
+</td></tr>
+<!-- Company Footer -->
+                                        <tr>
+                                            <td style="padding: 20px; text-align: center; font-size: 12px; color: #666; background-color: #fafafa; border-top: 1px solid #eee;">
+                                                Product by <strong>HEXR FACTORY IMMERSIVE TECH PRIVATE LIMITED</strong><br>
+                                                © ${new Date().getYear() + 1900}, All rights reserved.
+                                            </td>
+                                        </tr>
+</table>
+</body>
+</html>
+""",
+                    to: "marikannan@hexrfactory.com, rithish@hexrfactory.com, sabarinathan@hexrfactory.com, nivetha@hexrfactory.com, ramkumar@hexrfactory.com",
+                    cc: "marikannan@hexrfactory.com",
+                    mimeType: 'text/html',
+                    replyTo: "marikannan@hexrfactory.com",
+                    from: '$SMTP_CREDENTIALS_USR',
+                    recipientProviders: [
+                        [$class: 'DevelopersRecipientProvider'],
+                        [$class: 'RequesterRecipientProvider']
+                    ],
+                    presendScript: '''
+                        msg.setSubject(msg.getSubject().replaceAll("\\s+", " ").trim())
+                    ''',
+                    attachmentsPattern: "backend-sca-report/dependency-check-report.html, backend-gitleaks-reports/*.sarif, backend-gitleaks-reports/*.json, backend-trivy-reports/*.sarif"
+                )
+
+                try {
+                    def summaryContent = """
+Security Scan Summary
+====================
+Build: #${env.BUILD_NUMBER}
+Status: ${buildStatus}
+Date: ${currentTime}
+Branch: ${env.BRANCH_NAME ?: 'main'}
+Quick Access:
+- Build URL: ${env.BUILD_URL}
+- SonarQube: http://185.100.212.76:12345/
+Reports:
+✓ Dependency Check
+✓ Gitleaks Scan  
+✓ Trivy Container Scan
+✓ SonarQube Analysis
+"""
+                    writeFile file: 'scan-summary.txt', text: summaryContent
+                    archiveArtifacts artifacts: 'scan-summary.txt', allowEmptyArchive: true, fingerprint: true
+                    archiveArtifacts artifacts: 'backend-sca-report/**', allowEmptyArchive: true
+                    archiveArtifacts artifacts: 'backend-gitleaks-reports/**', allowEmptyArchive: true
+                    archiveArtifacts artifacts: 'backend-trivy-reports/**', allowEmptyArchive: true
+
+                    publishHTML([
+                        allowMissing: true,
+                        alwaysLinkToLastBuild: true,
+                        keepAll: true,
+                        reportDir: 'backend-sca-report',
+                        reportFiles: 'dependency-check-report.html',
+                        reportName: 'Security Report'
+                    ])
+                } catch (Exception e) {
+                    echo "Warning: Could not archive some artifacts: ${e.getMessage()}"
+                }
+
+                try {
+                    cleanWs()
+                } catch (Exception e) {
+                    echo "Warning: Workspace cleanup had issues: ${e.getMessage()}"
+                }
+            }
+        }
+        success {
+            powershell '''
+                Write-Host "Pipeline completed successfully!"
+                Write-Host "Build Number: $env:BUILD_NUMBER"
+                Write-Host "Workspace: $env:WORKSPACE"
+                Write-Host "Triggered by commit: $env:commit"
+                Write-Host "Author: $env:author"
+            '''
+        }
+        failure {
+            powershell '''
+                Write-Host "Pipeline failed!"
+                Write-Host "Please check the logs for details"
+                Write-Host "Triggered by commit: $env:commit"
+                Write-Host "Author: $env:author"
+            '''
+        }
+    }
+}

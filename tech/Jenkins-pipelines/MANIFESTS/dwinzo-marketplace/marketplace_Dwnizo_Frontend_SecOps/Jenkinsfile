@@ -1,0 +1,537 @@
+pipeline {
+    agent {
+        label 'remote-server-agent'
+    }
+
+    triggers {
+        GenericTrigger(
+            genericVariables: [
+                [key: 'ref', value: '$.ref'],
+                [key: 'commit', value: '$.after'],
+                [key: 'author', value: '$.commits[0].author.name']
+            ],
+            causeString: 'Triggered by commit on $ref by $author',
+            token: 'marketplace-Frontend-webhook',
+            printContributedVariables: true,
+            printPostContent: true,
+            regexpFilterText: '$ref',
+            regexpFilterExpression: '^refs/heads/feature/dwinzo-update$'
+        )
+    }
+
+    environment {
+        GIT_CREDENTIALS = credentials('rithishsamm')
+        SONAR_HOST_URL = 'http://185.100.212.76:12345'
+        SONAR_TOKEN = credentials('sonarqube-token')
+        SMTP_CREDENTIALS_USR = credentials('smtp-credentials-gmail')
+    }
+
+    stages {
+        stage('Source') {
+            steps {
+                cleanWs()
+                script {
+                    powershell '''
+                        Write-Host "Starting source stage..."
+                    '''
+
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: '*/feature/dwinzo-update']],
+                        userRemoteConfigs: [[
+                            url: 'http://ramkumar@hexrfactory.com:Ramkumar@123@185.100.212.76:7778/Marketplace/MarketPlace_FrontEnd.git',
+                        ]]
+                    ])
+
+                    powershell '''
+                        Write-Host "Source checkout completed successfully"
+                        dir
+                    '''
+                }
+            }
+        }
+
+        stage('Build') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Starting Docker Compose build..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        docker-compose build --no-cache
+                        dir
+                    '''
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Generating sonar-project.properties..."
+                        $sonarProps = @"
+sonar.projectKey=Marketplace_Dwinzo
+sonar.projectName=Marketplace_Dwinzo
+sonar.projectVersion=1.0.0
+sonar.projectDescription=This is a main project for Marketplace Dwinzo.
+sonar.sources=./frontend/
+sonar.language=js
+sonar.javascript.lcov.reportPaths=coverage/lcov.info
+"@
+                        Set-Content -Path "sonar-project.properties" -Value $sonarProps
+                        Write-Host "Running SonarScanner..."
+                        sonar-scanner
+                    '''
+                }
+            }
+        }
+    }
+
+post {
+    success {
+        emailext(
+            subject: "🛒 Marketplace Frontend Security Scan - Build ${env.BUILD_NUMBER} | Status: SUCCESS",
+            body: """
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <meta charset="utf-8">
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                    <title>Marketplace Frontend Security Report</title>
+                    <style>
+                        /* Reset and Base Styles */
+                        * { margin: 0; padding: 0; box-sizing: border-box; }
+                        body { 
+                            font-family: Arial, Helvetica, sans-serif; 
+                            background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+                            line-height: 1.6; 
+                            color: #334155;
+                            min-height: 100vh;
+                            padding: 20px 0;
+                        }
+                        
+                        table { border-collapse: collapse; mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+                        
+                        /* Container */
+                        .email-container { 
+                            width: 100%; 
+                            max-width: 850px; 
+                            margin: 0 auto; 
+                            background-color: #ffffff; 
+                            border-radius: 20px; 
+                            overflow: hidden; 
+                            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.1), 0 8px 25px rgba(219, 83, 117, 0.08);
+                            position: relative;
+                        }
+                        
+                        /* Decorative Elements */
+                        .email-container::before {
+                            content: '';
+                            position: absolute;
+                            top: 0;
+                            left: 0;
+                            right: 0;
+                            height: 4px;
+                            background: linear-gradient(90deg, #DB5375 0%, #B3FFB3 100%);
+                            z-index: 10;
+                        }
+                        
+                        /* Header Section */
+                        .header-section { 
+                            background: linear-gradient(135deg, #DB5375 0%, #c44569 50%, #DB5375 100%);
+                            color: white; 
+                            padding: 50px 40px; 
+                            text-align: center; 
+                            position: relative;
+                            overflow: hidden;
+                        }
+                        
+                        .header-section::before {
+                            content: '';
+                            position: absolute;
+                            top: -50%;
+                            left: -50%;
+                            width: 200%;
+                            height: 200%;
+                            background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 70%);
+                        }
+                        
+                        .logo-container {
+                            position: relative;
+                            z-index: 2;
+                            margin-bottom: 25px;
+                        }
+                        
+                        .logo-main { 
+                            font-size: 36px; 
+                            font-weight: 800; 
+                            letter-spacing: 2px; 
+                            text-transform: uppercase;
+                            text-shadow: 0 4px 15px rgba(0,0,0,0.2);
+                        }
+                        
+                        .logo-beta { 
+                            font-size: 16px; 
+                            font-weight: 600; 
+                            opacity: 0.95;
+                            margin-top: 8px;
+                            padding: 6px 16px;
+                            background: rgba(255,255,255,0.15);
+                            border-radius: 25px;
+                            display: inline-block;
+                        }
+                        
+                        .header-title { 
+                            font-size: 32px; 
+                            font-weight: 700; 
+                            margin: 20px 0 12px 0;
+                            text-shadow: 0 2px 10px rgba(0,0,0,0.2);
+                        }
+                        
+                        .build-info {
+                            font-size: 16px;
+                            opacity: 0.9;
+                            padding: 12px 24px;
+                            background: rgba(255,255,255,0.1);
+                            border-radius: 30px;
+                            display: inline-block;
+                            margin-top: 15px;
+                        }
+                        
+                        /* Greeting Section */
+                        .greeting-section { 
+                            padding: 35px 40px; 
+                            background: linear-gradient(135deg, #B3FFB3 0%, #a8f5a8 100%);
+                            border-bottom: 1px solid rgba(219, 83, 117, 0.1);
+                            position: relative;
+                        }
+                        
+                        .greeting-section::after {
+                            content: '';
+                            position: absolute;
+                            bottom: 0;
+                            left: 0;
+                            right: 0;
+                            height: 1px;
+                            background: linear-gradient(90deg, transparent 0%, #DB5375 50%, transparent 100%);
+                        }
+                        
+                        .greeting-text { 
+                            font-size: 22px; 
+                            color: #065f46; 
+                            font-weight: 700;
+                            margin-bottom: 8px;
+                        }
+                        
+                        .greeting-subtext {
+                            font-size: 16px;
+                            color: #047857;
+                            font-weight: 500;
+                        }
+                        
+                        /* Status Banner */
+                        .status-banner { 
+                            background: linear-gradient(135deg, #059669 0%, #047857 100%);
+                            color: white; 
+                            padding: 30px 40px; 
+                            text-align: center;
+                            position: relative;
+                            overflow: hidden;
+                        }
+                        
+                        .status-text {
+                            font-size: 24px;
+                            font-weight: 700;
+                            text-shadow: 0 2px 8px rgba(0,0,0,0.2);
+                            position: relative;
+                            z-index: 2;
+                        }
+                        
+                        /* Content Section */
+                        .content-section { 
+                            padding: 40px; 
+                        }
+                        
+                        .section-title { 
+                            font-size: 24px; 
+                            font-weight: 700; 
+                            color: #1e293b; 
+                            margin-bottom: 25px;
+                            display: block;
+                        }
+                        
+                        /* Report Items */
+                        .report-item { 
+                            background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+                            padding: 25px; 
+                            margin: 15px 0; 
+                            border-radius: 16px; 
+                            border: 2px solid #DB5375;
+                            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.08);
+                        }
+                        
+                        .report-name { 
+                            font-size: 18px; 
+                            font-weight: 700; 
+                            color: #1e293b; 
+                            margin-bottom: 12px;
+                        }
+                        
+                        .report-link { 
+                            color: #DB5375; 
+                            text-decoration: none; 
+                            font-weight: 600; 
+                            font-size: 16px;
+                            padding: 8px 16px;
+                            background: rgba(219, 83, 117, 0.1);
+                            border-radius: 8px;
+                        }
+                        
+                        /* Credentials Section */
+                        .credentials-section { 
+                            background: linear-gradient(135deg, #fef3c7 0%, #fde68a 50%, #B3FFB3 100%);
+                            border-radius: 20px; 
+                            padding: 30px; 
+                            margin: 30px 0; 
+                            border: 3px solid #f59e0b;
+                            position: relative;
+                            overflow: hidden;
+                        }
+                        
+                        .credentials-section::before {
+                            content: '🔐';
+                            position: absolute;
+                            top: -20px;
+                            right: -20px;
+                            font-size: 100px;
+                            opacity: 0.1;
+                            z-index: 1;
+                        }
+                        
+                        .credentials-title { 
+                            font-size: 20px; 
+                            font-weight: 700; 
+                            color: #92400e; 
+                            margin-bottom: 20px;
+                            position: relative;
+                            z-index: 2;
+                        }
+                        
+                        .credential-item { 
+                            background: rgba(255, 255, 255, 0.95);
+                            padding: 18px 20px; 
+                            margin: 12px 0; 
+                            border-radius: 12px; 
+                            font-family: 'Courier New', monospace; 
+                            font-size: 15px;
+                            border-left: 5px solid #f59e0b;
+                            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+                            position: relative;
+                            z-index: 2;
+                        }
+                        
+                        /* Footer Section */
+                        .footer-section { 
+                            background: linear-gradient(135deg, #1e293b 0%, #334155 50%, #DB5375 100%);
+                            color: white; 
+                            padding: 45px 40px; 
+                            text-align: center;
+                            position: relative;
+                            overflow: hidden;
+                        }
+                        
+                        .footer-section::before {
+                            content: '';
+                            position: absolute;
+                            top: 0;
+                            left: 0;
+                            right: 0;
+                            bottom: 0;
+                            opacity: 0.3;
+                        }
+                        
+                        .footer-title {
+                            font-size: 22px;
+                            font-weight: 800;
+                            margin-bottom: 20px;
+                            color: #B3FFB3;
+                            position: relative;
+                            z-index: 2;
+                        }
+                        
+                        .footer-content {
+                            position: relative;
+                            z-index: 2;
+                        }
+                        
+                        .footer-divider {
+                            margin: 25px 0;
+                            padding-top: 25px;
+                            border-top: 2px solid rgba(179, 255, 179, 0.3);
+                        }
+                        
+                        /* Company Footer */
+                        .company-footer {
+                            padding: 25px;
+                            text-align: center;
+                            font-size: 14px;
+                            color: #64748b;
+                            background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+                            border-top: 2px solid #DB5375;
+                        }
+                        
+                        .company-name {
+                            font-weight: 700;
+                            color: #DB5375;
+                        }
+                        
+                        /* Responsive Design */
+                        @media (max-width: 600px) {
+                            .email-container { margin: 10px; border-radius: 15px; }
+                            .header-section, .content-section { padding: 25px 20px; }
+                            .logo-main { font-size: 28px; }
+                            .header-title { font-size: 26px; }
+                            .section-title { font-size: 20px; }
+                        }
+                    </style>
+                </head>
+                <body>
+                <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                    <tr>
+                        <td align="center" style="padding: 20px;">
+                            <div class="email-container">
+                                <!-- Header Section -->
+                                <div class="header-section">
+                                    <div class="logo-container">
+                                        <div class="logo-main">🛒 MARKETPLACE</div>
+                                        <div class="logo-beta">Frontend Security</div>
+                                    </div>
+                                    <h1 class="header-title">🎯 Code Quality Report</h1>
+                                    <div class="build-info">
+                                        Build #${env.BUILD_NUMBER} • Marketplace Frontend
+                                    </div>
+                                </div>
+
+                                <!-- Greeting -->
+                                <div class="greeting-section">
+                                    <p class="greeting-text">Hello Development Team! 👋</p>
+                                    <p class="greeting-subtext">Your latest SonarQube security scan has completed with excellent results!</p>
+                                </div>
+
+                                <!-- Status Banner -->
+                                <div class="status-banner">
+                                    <p class="status-text">✅ SonarQube Scan Completed Successfully</p>
+                                </div>
+
+                                <!-- Reports Section -->
+                                <div class="content-section">
+                                    <h2 class="section-title">📊 View Your Security Analysis</h2>
+                                    <div class="report-item">
+                                        <div class="report-name">📈 SonarQube Security Dashboard</div>
+                                        <p style="margin-bottom: 15px; color: #64748b;">Access comprehensive security analysis, code quality metrics, and vulnerability reports</p>
+                                        <a href="${env.SONAR_HOST_URL}/dashboard?id=Marketplace_Dwinzo" target="_blank" class="report-link">
+                                            Access Full Report →
+                                        </a>
+                                    </div>
+                                    <div class="report-item">
+                                        <div class="report-name">🔍 Quality Gate Status</div>
+                                        <p style="margin-bottom: 15px; color: #64748b;">Review detailed quality gate conditions and overall project health</p>
+                                        <a href="${env.SONAR_HOST_URL}/dashboard?id=Marketplace_Dwinzo" target="_blank" class="report-link">
+                                            View Quality Gates →
+                                        </a>
+                                    </div>
+                                </div>
+
+                                <!-- Credentials Section -->
+                                <div class="content-section">
+                                    <h2 class="section-title">🔑 Access Credentials</h2>
+                                    <div class="credentials-section">
+                                        <div class="credentials-title">
+                                            ⚠️ Temporary Review Access - Confidential
+                                        </div>
+                                        <p style="color: #92400e; font-size: 16px; margin-bottom: 20px; font-weight: 500;">
+                                            These credentials are for security review purposes only. Please maintain confidentiality and use responsibly.
+                                        </p>
+                                        <div class="credential-item">
+                                            <strong>🧑‍💻 Username:</strong> <span style="color: #DB5375; font-weight: 700;">admin</span>
+                                        </div>
+                                        <div class="credential-item">
+                                            <strong>🔐 Password:</strong> <span style="color: #DB5375; font-weight: 700;">R@mkumar.p.1</span>
+                                        </div>
+                                        <p style="font-size: 14px; color: #92400e; margin-top: 15px; font-style: italic; background: rgba(255,255,255,0.7); padding: 10px; border-radius: 8px;">
+                                            💡 <strong>Note:</strong> If you have individual access credentials, please prioritize those first. Use the above credentials only as a fallback option.
+                                        </p>
+                                    </div>
+                                </div>
+
+                                <!-- Footer Section -->
+                                <div class="footer-section">
+                                    <div class="footer-content">
+                                        <div class="footer-title">⚡ DevOps & Quality Assurance Team ✨</div>
+                                        <p style="font-size: 16px; margin: 12px 0; opacity: 0.95; font-weight: 500;">
+                                            <strong>🎉 Congratulations!</strong> This build has successfully passed all security and quality checks.
+                                        </p>
+                                        <p style="font-size: 15px; margin: 10px 0; opacity: 0.9;">
+                                            Your dedication to code quality and security best practices keeps our marketplace platform robust and secure.
+                                        </p>
+                                        <div class="footer-divider">
+                                            <p style="font-size: 14px; margin: 8px 0; opacity: 0.85;">
+                                                🤖 <strong>Automated CI/CD Notification</strong><br>
+                                                Jenkins Pipeline configured and maintained by <strong style="color: #B3FFB3;">Rithish Samm</strong> & <strong style="color: #B3FFB3;">Ramkumar P.</strong>
+                                            </p>
+                                            <div style="margin-top: 20px; padding: 15px; background: rgba(179, 255, 179, 0.1); border-radius: 10px;">
+                                                <span style="color: #B3FFB3; font-weight: 700; font-size: 16px;">💬 Need Support?</span><br>
+                                                <span style="font-size: 14px; opacity: 0.9;">Reach out to our DevOps/QA team for assistance with reports, access issues, or technical questions.</span>
+                                            </div>
+                                        </div>
+                                        <p style="font-size: 12px; opacity: 0.7; margin-top: 20px; font-style: italic;">
+                                            🚀 "Great developers don't just write code — they craft secure, scalable solutions" 💻
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+                        </td>
+                    </tr>
+
+                    <!-- Company Footer -->
+                    <tr>
+                        <td class="company-footer">
+                            <div>
+                                Proudly developed by <span class="company-name">HEXR FACTORY IMMERSIVE TECH PRIVATE LIMITED</span><br>
+                                <span style="font-size: 12px; opacity: 0.8;">© 2025 • All rights reserved • Innovative Technology Solutions</span>
+                            </div>
+                        </td>
+                    </tr>
+                </table>
+                </body>
+                </html>
+            """,
+            to: "marikannan@hexrfactory.com, vishnu@hexrfactory.com, rithish@hexrfactory.com, poovizhi@hexrfactory.com, ramkumar@hexrfactory.com",
+            mimeType: 'text/html',
+            replyTo: "marikannan@hexrfactory.com",
+            from: '$SMTP_CREDENTIALS_USR'
+        )
+
+        powershell '''
+            Write-Host "Pipeline completed successfully!"
+            Write-Host "Build Number: $env:BUILD_NUMBER"
+            Write-Host "Workspace: $env:WORKSPACE"
+            Write-Host "Triggered by commit: $env:commit"
+            Write-Host "Author: $env:author"
+        '''
+    }
+
+    failure {
+        powershell '''
+            Write-Host "❌ Pipeline failed!"
+            Write-Host "Check the logs above for details."
+            Write-Host "Triggered by commit: $env:commit"
+            Write-Host "Author: $env:author"
+        '''
+    }
+
+    always {
+        cleanWs()
+    }
+}
+}

@@ -1,3 +1,5 @@
+// Pipeline script for Windows environment using PowerShell
+// Handles Node.js app deployment with Docker Compose using POLLSCM
 pipeline {
     agent {
         label 'remote-server-agent'
@@ -11,36 +13,34 @@ pipeline {
                 [key: 'author', value: '$.commits[0].author.name']
             ],
             causeString: 'Triggered by commit on $ref by $author',
-            token: 'dwinzoBetaOrgDwinzoDev',
+            token: 'marketplace-Frontend-webhook',
             printContributedVariables: true,
             printPostContent: true,
             regexpFilterText: '$ref',
-            regexpFilterExpression: '^refs/heads/main$'
+            regexpFilterExpression: '^refs/heads/feature/dwinzo-update$'
         )
     }
 
     environment {
         GIT_CREDENTIALS = credentials('rithishsamm')
-        DOCKER_COMPOSE = 'docker-compose'
-        APP_NAME = 'Dwinzo-Beta/Dwinzo_dev'
-        MAIN_CONTAINER = 'dwinzo-beta'
+        MAIN_CONTAINER = 'marketplace-frontend'
     }
 
     stages {
         stage('Source') {
             steps {
-                cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+                cleanWs()
                 script {
                     powershell '''
-                        Write-Host "Starting source checkout..."
+                        Write-Host "Starting source stage..."
                     '''
 
                     checkout([
                         $class: 'GitSCM',
-                        branches: [[name: '*/main']],
+                        branches: [[name: '*/feature/dwinzo-update']],
                         userRemoteConfigs: [[
-                            url: 'http://185.100.212.76:7776/Dwinzo-Beta/Dwinzo_dev.git',
-                            credentialsId: env.GIT_CREDENTIALS
+                            url: 'http://ramkumar@hexrfactory.com:Ramkumar@123@185.100.212.76:7778/Marketplace/MarketPlace_FrontEnd.git',
+                            
                         ]]
                     ])
 
@@ -56,7 +56,7 @@ pipeline {
             steps {
                 script {
                     powershell '''
-                        Write-Host "Building Docker images..."
+                        Write-Host "Starting Docker Compose build..."
                         $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
                         docker-compose build --no-cache
                         dir
@@ -68,45 +68,36 @@ pipeline {
         stage('Deploy') {
             steps {
                 script {
-                    powershell '''
-                        Write-Host "Cleaning up old container if exists..."
-                        $containerExists = docker ps -a -q -f "name=$env:MAIN_CONTAINER"
-                        if ($containerExists) {
-                            Write-Host "Stopping and removing old container: $env:MAIN_CONTAINER"
-                            docker stop $env:MAIN_CONTAINER
-                            docker rm $env:MAIN_CONTAINER
+                    powershell """
+                        Write-Host "Cleaning up old container if it exists..."
+
+                        \$containerExists = docker ps -a -q -f "name=${env.MAIN_CONTAINER}"
+                        if (\$containerExists) {
+                            Write-Host "Stopping and removing existing container: ${env.MAIN_CONTAINER}"
+                            docker stop ${env.MAIN_CONTAINER}
+                            docker rm ${env.MAIN_CONTAINER}
                         } else {
-                            Write-Host "No old container found for removal."
+                            Write-Host "No existing container found, skipping removal."
                         }
 
-                        Write-Host "Listing existing containers:"
-                        docker ps -a
-                        dir
-                    '''
-
-                    powershell '''
-                        Write-Host "Starting deployment..."
-                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        Write-Host "Starting deployment with Docker Compose..."
+                        \$env:COMPOSE_CONVERT_WINDOWS_PATHS=1
                         docker-compose up -d --build
 
                         Start-Sleep -Seconds 10
 
-                        $mainContainer = docker ps -q -f "name=$env:MAIN_CONTAINER"
-                        if (-not $mainContainer) {
-                            Write-Error "Main container not running!"
-                            docker ps -a
+                        Write-Host "Verifying container status..."
+                        \$containerId = docker ps -q -f "name=${env.MAIN_CONTAINER}"
+                        if (-not \$containerId) {
+                            Write-Error "❌ Application container (${env.MAIN_CONTAINER}) not found after deployment"
                             exit 1
                         }
 
-                        Write-Host "Deployment successful!"
-                        Write-Host "Main Container ID: $mainContainer"
-                        Write-Host "Fetching container logs..."
-                        docker logs $mainContainer
-
-                        Write-Host "Currently running containers:"
+                        Write-Host "✅ Application deployed successfully!"
+                        Write-Host "Container ID: \$containerId"
+                        docker logs \$containerId
                         docker ps
-                        dir
-                    '''
+                    """
                 }
             }
         }
@@ -125,14 +116,14 @@ pipeline {
         failure {
             powershell '''
                 Write-Host "❌ Pipeline failed!"
+                Write-Host "Check the logs above for details."
                 Write-Host "Triggered by commit: $env:commit"
                 Write-Host "Author: $env:author"
-                Write-Host "Container status:"
                 docker ps -a
             '''
         }
         always {
-            cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+            cleanWs()
         }
     }
 }

@@ -24,7 +24,7 @@ pipeline {
         DOCKER_COMPOSE      = 'docker-compose'
         APP_NAME            = 'Sabarinathan/marketplace_Dwnizo_backend'
         SONAR_HOST_URL      = 'http://185.100.212.76:12345'
-        SONAR_TOKEN         = 'sqp_cc103cf68c3551314d644ab5372568e12a9b0c97' // Hardcoded Sonar token
+        SONAR_TOKEN         = 'sqp_cc103cf68c3551314d644ab5372568e12a9b0c97'
         SMTP_CREDENTIALS    = credentials('smtp-credentials-gmail')
 
         // Report paths
@@ -431,7 +431,7 @@ sonar.typescript.lcov.reportPaths=coverage/lcov.info
 </body>
 </html>
 """,
-                to: "ramkumar@hexrfactory.com, surya@hexrfactory.com",
+                to: "marikannan@hexrfactory.com, rithish@hexrfactory.com, sabarinathan@hexrfactory.com, nivetha@hexrfactory.com, ramkumar@hexrfactory.com",
                 cc: "marikannan@hexrfactory.com",
                 mimeType: 'text/html',
                 replyTo: "marikannan@hexrfactory.com",

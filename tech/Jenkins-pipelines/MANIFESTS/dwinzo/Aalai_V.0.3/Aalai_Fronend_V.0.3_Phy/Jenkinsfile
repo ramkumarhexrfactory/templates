@@ -1,0 +1,383 @@
+pipeline {
+    agent { label 'remote-server-agent' }
+
+    triggers {
+        GenericTrigger(
+            genericVariables: [
+                [key: 'ref', value: '$.ref'],
+                [key: 'commit', value: '$.after'],
+                [key: 'author', value: '$.commits[0].author.name']
+            ],
+            causeString: 'Triggered by commit on $ref by $author',
+            token: 'aalaiDemoDevPhysics',
+            printContributedVariables: true,
+            printPostContent: true,
+            regexpFilterText: '$ref',
+            regexpFilterExpression: '^refs/heads/dev-physics$'
+        )
+    }
+
+    environment {
+        GIT_CREDENTIALS = credentials('ramkumarp')
+        DOCKER_COMPOSE = 'docker-compose'
+        APP_NAME = 'Dwinzo-Beta/aalai_Demo_3'
+        MAIN_CONTAINER = 'aalaiDemoThreePhy'   
+        WEBSITE_URL = 'http://185.100.212.76:8401'   
+        SMTP_CREDENTIALS = credentials('smtp-credentials-gmail')
+    }
+
+    stages {
+        stage('Source') {
+            steps {
+                cleanWs(deleteDirs: true)
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: '*/dev-physics']],
+                    userRemoteConfigs: [[
+                        url: 'http://185.100.212.76:7778/Dwinzo-Beta/Dwinzo_Demo.git',
+                        credentialsId: env.GIT_CREDENTIALS
+                    ]]
+                ])
+            }
+        }
+
+        stage('Build') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "📦 Building Docker image for Aalai Demo 3 (Physics)..."
+                        docker-compose build --no-cache
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "♻️ Stopping and removing old container if it exists..."
+                        $containerExists = docker ps -a -q -f "name=$env:MAIN_CONTAINER"
+                        if ($containerExists) {
+                            docker stop $env:MAIN_CONTAINER | Out-Null
+                            docker rm -f $env:MAIN_CONTAINER | Out-Null
+                            Write-Host "🧹 Old container stopped and removed."
+                        } else {
+                            Write-Host "ℹ️ No old container found. Proceeding with deployment."
+                        }
+
+                        Write-Host "🧹 Cleaning up unused Docker networks..."
+                        docker network prune -f | Out-Null
+
+                        Write-Host "🚀 Starting new container from the freshly built image..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        docker-compose up -d
+
+                        Start-Sleep -Seconds 10
+
+                        $mainContainer = docker ps -q -f "name=$env:MAIN_CONTAINER"
+                        if (-not $mainContainer) {
+                            Write-Error "❌ Main application container ($env:MAIN_CONTAINER) not found after deployment."
+                            exit 1
+                        }
+
+                        Write-Host "✅ Application deployed successfully!"
+                        docker ps
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                def buildResult = currentBuild.result ?: 'SUCCESS'
+                def statusIcon = buildResult == 'SUCCESS' ? '✅' : '❌'
+                
+                // Get current date for the email
+                def date = new Date()
+                
+                emailext(
+                    subject: "${statusIcon} Aalai Frontend (Dev-Physics) - Build ${env.BUILD_NUMBER} | ${buildResult}",
+                    body: """
+                        <!DOCTYPE html>
+                            <html lang="en">
+                            <head>
+                                <meta charset="UTF-8">
+                                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                                <title>Build Notification - UI Preview</title>
+                                <style>
+                                    body { 
+                                        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+                                        line-height: 1.6; 
+                                        color: #3F1D38; 
+                                        margin: 0; 
+                                        padding: 0; 
+                                        background: linear-gradient(135deg, #FFD6A5 0%, #AF5279 50%, #3F1D38 100%);
+                                        min-height: 100vh;
+                                    }
+                                    .container { 
+                                        max-width: 650px; 
+                                        margin: 20px auto; 
+                                        background: rgba(255, 255, 255, 0.95);
+                                        border-radius: 15px;
+                                        box-shadow: 0 20px 40px rgba(63, 29, 56, 0.3);
+                                        overflow: hidden;
+                                        backdrop-filter: blur(10px);
+                                    }
+                                    .header { 
+                                        padding: 40px 30px; 
+                                        text-align: center; 
+                                        background: linear-gradient(135deg, #3F1D38 0%, #AF5279 100%);
+                                        color: white; 
+                                        position: relative;
+                                    }
+                                    .header::before {
+                                        content: '';
+                                        position: absolute;
+                                        top: 0;
+                                        left: 0;
+                                        right: 0;
+                                        bottom: 0;
+                                        background: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 20"><defs><radialGradient id="grain"><stop offset="20%" stop-opacity="0.1"/><stop offset="100%" stop-opacity="0"/></radialGradient></defs><rect width="100" height="20" fill="url(%23grain)"/></svg>');
+                                        opacity: 0.3;
+                                    }
+                                    .header h1 {
+                                        margin: 0;
+                                        font-size: 28px;
+                                        font-weight: 300;
+                                        letter-spacing: 1px;
+                                        position: relative;
+                                        z-index: 1;
+                                    }
+                                    .content { 
+                                        padding: 40px 30px; 
+                                        background: linear-gradient(to bottom, rgba(255, 214, 165, 0.1) 0%, rgba(175, 82, 121, 0.05) 100%);
+                                    }
+                                    .status-box { 
+                                        border-radius: 12px; 
+                                        padding: 25px; 
+                                        margin-bottom: 30px; 
+                                        text-align: center;
+                                        box-shadow: 0 8px 25px rgba(0,0,0,0.1);
+                                        backdrop-filter: blur(5px);
+                                    }
+                                    .success { 
+                                        background: linear-gradient(135deg, rgba(255, 214, 165, 0.9) 0%, rgba(255, 214, 165, 0.7) 100%);
+                                        border: 2px solid #FFD6A5;
+                                        color: #3F1D38;
+                                    }
+                                    .failure { 
+                                        background: linear-gradient(135deg, rgba(175, 82, 121, 0.2) 0%, rgba(63, 29, 56, 0.1) 100%);
+                                        border: 2px solid #AF5279;
+                                        color: #3F1D38;
+                                    }
+                                    .build-info { 
+                                        background: rgba(255, 255, 255, 0.8);
+                                        padding: 25px; 
+                                        border-radius: 12px; 
+                                        margin: 25px 0;
+                                        border-left: 5px solid #AF5279;
+                                        box-shadow: 0 5px 15px rgba(175, 82, 121, 0.1);
+                                        backdrop-filter: blur(5px);
+                                    }
+                                    .build-info p {
+                                        margin: 12px 0;
+                                        display: flex;
+                                        justify-content: space-between;
+                                        align-items: center;
+                                    }
+                                    .build-info strong {
+                                        color: #3F1D38;
+                                        font-weight: 600;
+                                    }
+                                    .button { 
+                                        display: inline-block; 
+                                        padding: 15px 30px; 
+                                        background: linear-gradient(135deg, #AF5279 0%, #3F1D38 100%);
+                                        color: white; 
+                                        text-decoration: none; 
+                                        border-radius: 25px; 
+                                        margin: 15px 0;
+                                        font-weight: 500;
+                                        letter-spacing: 0.5px;
+                                        transition: all 0.3s ease;
+                                        box-shadow: 0 8px 20px rgba(175, 82, 121, 0.3);
+                                    }
+                                    .button:hover {
+                                        transform: translateY(-2px);
+                                        box-shadow: 0 12px 30px rgba(175, 82, 121, 0.4);
+                                    }
+                                    .footer { 
+                                        padding: 30px; 
+                                        text-align: center; 
+                                        font-size: 13px; 
+                                        color: #AF5279; 
+                                        background: linear-gradient(135deg, rgba(255, 214, 165, 0.3) 0%, rgba(255, 214, 165, 0.1) 100%);
+                                        border-top: 1px solid rgba(175, 82, 121, 0.2);
+                                    }
+                                    .details { 
+                                        margin-top: 30px; 
+                                        padding: 20px;
+                                        background: rgba(255, 214, 165, 0.2);
+                                        border-radius: 10px;
+                                        border: 1px solid rgba(175, 82, 121, 0.2);
+                                    }
+                                    .icon { 
+                                        font-size: 28px; 
+                                        margin-right: 12px; 
+                                        vertical-align: middle; 
+                                    }
+                                    h2 { 
+                                        margin-top: 0; 
+                                        font-weight: 400;
+                                        font-size: 24px;
+                                    }
+                                    .accent-line {
+                                        height: 3px;
+                                        background: linear-gradient(90deg, #FFD6A5 0%, #AF5279 50%, #3F1D38 100%);
+                                        margin: 20px 0;
+                                        border-radius: 2px;
+                                    }
+                                    .badge {
+                                        display: inline-block;
+                                        padding: 8px 16px;
+                                        border-radius: 20px;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        text-transform: uppercase;
+                                        letter-spacing: 1px;
+                                        background: linear-gradient(135deg, #3F1D38 0%, #AF5279 100%);
+                                        color: white;
+                                        margin-left: 10px;
+                                    }
+                                    
+                                    /* Demo controls */
+                                    .demo-controls {
+                                        position: fixed;
+                                        top: 20px;
+                                        right: 20px;
+                                        background: rgba(255, 255, 255, 0.95);
+                                        padding: 15px;
+                                        border-radius: 10px;
+                                        box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+                                        z-index: 1000;
+                                    }
+                                    .demo-controls button {
+                                        background: #AF5279;
+                                        color: white;
+                                        border: none;
+                                        padding: 8px 16px;
+                                        border-radius: 5px;
+                                        margin: 5px;
+                                        cursor: pointer;
+                                        font-size: 12px;
+                                    }
+                                    .demo-controls button:hover {
+                                        background: #3F1D38;
+                                    }
+                                </style>
+                            </head>
+                            <body>
+                                <div class="demo-controls">
+                                    <div style="font-weight: 600; color: #3F1D38; margin-bottom: 10px;">Demo Controls</div>
+                                    <button onclick="showSuccess()">✅ Success Build</button>
+                                    <button onclick="showFailure()">❌ Failed Build</button>
+                                </div>
+                            
+                                <div class="container">
+                                    <div class="header">
+                                        <h1>Aalai Frontend <span style="opacity: 0.8;">(Dev-Physics)</span></h1>
+                                    </div>
+                                    
+                                    <div class="content">
+                                        <div class="status-box success" id="statusBox">
+                                            <h2 id="statusText">✅ Build #247 - SUCCESS</h2>
+                                            <div class="accent-line"></div>
+                                        </div>
+                                        
+                                        <div class="build-info">
+                                            <p><strong>Project:</strong> <span>Aalai Frontend (Dev-Physics)</span></p>
+                                            <p><strong>Build Number:</strong> <span id="buildNumber">247 <span class="badge" id="statusBadge">SUCCESS</span></span></p>
+                                            <p><strong>Status:</strong> <span style="color: #2E7D32; font-weight: 600;" id="statusColor">SUCCESS</span></p>
+                                            <p><strong>Timestamp:</strong> <span>Mon Aug 25 14:32:18 IST 2025</span></p>
+                                        </div>
+                                        
+                                        <div style='text-align: center; margin: 30px 0;' id="liveButton">
+                                            <a href='#' class='button'>
+                                                🌐 View Live Application
+                                            </a>
+                                        </div>
+                                        
+                                        <div class="details">
+                                            <p><strong>📋 Build Details:</strong> Check the Jenkins build logs attached to this email for comprehensive information.</p>
+                                            <div class="accent-line"></div>
+                                            <p><strong>💬 Support:</strong> For technical support or pipeline issues, please contact the DevOps/QA Team</p>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="footer">
+                                        <p><strong>Jenkins CI/CD System</strong> • Automated Build Notification</p>
+                                        <p style="margin-top: 10px; font-size: 12px; opacity: 0.8;">Pipeline configured and maintained by Rithish Sam & Ramkumar P.</p>
+                                        <div style="margin-top: 15px; padding-top: 10px; border-top: 1px solid rgba(175, 82, 121, 0.2);">
+                                            <p style="margin: 5px 0; font-size: 12px;">Primary Contact: <a href="mailto:marikannan@hexrfactory.com" style="color: #AF5279; text-decoration: none;">marikannan@hexrfactory.com</a></p>
+                                        </div>
+                                    </div>
+                                </div>
+                            
+                                <script>
+                                    function showSuccess() {
+                                        const statusBox = document.getElementById('statusBox');
+                                        const statusText = document.getElementById('statusText');
+                                        const statusBadge = document.getElementById('statusBadge');
+                                        const statusColor = document.getElementById('statusColor');
+                                        const buildNumber = document.getElementById('buildNumber');
+                                        const liveButton = document.getElementById('liveButton');
+                                        
+                                        statusBox.className = 'status-box success';
+                                        statusText.textContent = '✅ Build #247 - SUCCESS';
+                                        statusBadge.textContent = 'SUCCESS';
+                                        statusColor.textContent = 'SUCCESS';
+                                        statusColor.style.color = '#2E7D32';
+                                        buildNumber.innerHTML = '247 <span class="badge">SUCCESS</span>';
+                                        liveButton.style.display = 'block';
+                                    }
+                                    
+                                    function showFailure() {
+                                        const statusBox = document.getElementById('statusBox');
+                                        const statusText = document.getElementById('statusText');
+                                        const statusBadge = document.getElementById('statusBadge');
+                                        const statusColor = document.getElementById('statusColor');
+                                        const buildNumber = document.getElementById('buildNumber');
+                                        const liveButton = document.getElementById('liveButton');
+                                        
+                                        statusBox.className = 'status-box failure';
+                                        statusText.textContent = '❌ Build #248 - FAILURE';
+                                        statusBadge.textContent = 'FAILURE';
+                                        statusColor.textContent = 'FAILURE';
+                                        statusColor.style.color = '#C62828';
+                                        buildNumber.innerHTML = '248 <span class="badge" style="background: linear-gradient(135deg, #C62828 0%, #AF5279 100%);">FAILURE</span>';
+                                        liveButton.style.display = 'none';
+                                    }
+                                </script>
+                            </body>
+                            </html>
+                    """,
+                    to: "marikannan@hexrfactory.com, vishnu@hexrfactory.com, rithish@hexrfactory.com, jerald@hexrfactory.com, gomathi@hexrfactory.com, ramkumar@hexrfactory.com",
+                    attachLog: true,
+                    mimeType: 'text/html',
+                    replyTo: "marikannan@hexrfactory.com",
+                    from: '$SMTP_CREDENTIALS_USR'
+                )
+            }
+        }
+    
+        success {
+            powershell ''' Write-Host "✅ Deployment successful!" '''
+        }
+        failure {
+            powershell ''' Write-Host "❌ Deployment failed." '''
+        }
+    }
+}

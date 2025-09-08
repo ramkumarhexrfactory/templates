@@ -1,0 +1,560 @@
+pipeline {
+    agent {
+        label 'remote-server-agent'
+    }
+
+    triggers {
+        GenericTrigger(
+            genericVariables: [
+                [key: 'ref', value: '$.ref'],
+                [key: 'commit', value: '$.after'],
+                [key: 'author', value: '$.commits[0].author.name']
+            ],
+            causeString: 'Triggered by commit on $ref by $author',
+            token: 'dwinzoBetaDwinzoDemo',
+            printContributedVariables: true,
+            printPostContent: true,
+            regexpFilterText: '$ref',
+            regexpFilterExpression: '^refs/heads/main-demo$'
+        )
+    }
+
+    environment {
+        GIT_CREDENTIALS   = credentials('ramkumarp')
+        SONAR_HOST_URL    = 'http://185.100.212.76:12345'
+        SONAR_TOKEN       = credentials('sonarqube-token')
+        SMTP_CREDENTIALS  = credentials('smtp-credentials-gmail')
+    }
+
+    stages {
+        stage('Source') {
+            steps {
+                script {
+                    cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: '*/main-demo']],
+                        userRemoteConfigs: [[
+                            url: 'http://185.100.212.76:7778/Dwinzo-Beta/Dwinzo_Demo.git',
+                            credentialsId: env.GIT_CREDENTIALS
+                        ]]
+                    ])
+                }
+            }
+        }
+
+        stage('Build') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Starting Docker build..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        docker-compose build --no-cache
+                        docker images
+                    '''
+                }
+            }
+        }
+
+        stage('Image Scan with Trivy') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Running Trivy scan..."
+                        if (-not (Test-Path ".\\frontend-trivy-reports")) {
+                            New-Item -ItemType Directory -Path ".\\frontend-trivy-reports" | Out-Null
+                        }
+                        $images = @("aalaiDemoTwo:latest")
+                        foreach ($image in $images) {
+                            $imageExists = docker images --format "{{.Repository}}:{{.Tag}}" | Select-String -Pattern "^$image$"
+                            if (-not $imageExists) { continue }
+                            C:\\Tools\\Trivy\\trivy.exe image `
+                                --severity HIGH,CRITICAL `
+                                --format sarif `
+                                --output ".\\frontend-trivy-reports\\$($image.Replace(':', '_')).sarif" `
+                                $image
+                        }
+                        Write-Host "Trivy scan completed."
+                    '''
+                }
+            }
+        }
+
+        stage('Secret Scanning with Gitleaks') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Running Gitleaks scan..."
+                        if (-not (Test-Path ".\\frontend-gitleaks-reports")) {
+                            New-Item -ItemType Directory -Path ".\\frontend-gitleaks-reports" | Out-Null
+                        }
+                        C:\\Tools\\Gitleaks\\gitleaks.exe detect `
+                            --source ./ `
+                            --report-format sarif `
+                            --report-path ".\\frontend-gitleaks-reports\\gitleaks-report.sarif"
+                        Write-Host "Gitleaks scan completed."
+                    '''
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Preparing SonarQube properties..."
+                        $sonarProps = @"
+sonar.projectKey=Aalai_Fronend_V.0.3
+sonar.projectName=Aalai_Fronend_V.0.3
+sonar.projectVersion=1.0.0
+sonar.sources=./app/
+sonar.language=ts
+sonar.typescript.lcov.reportPaths=coverage/lcov.info
+"@
+                        Set-Content -Path "sonar-project.properties" -Value $sonarProps
+                        Write-Host "Running SonarScanner..."
+                        sonar-scanner
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+    always {
+        script {
+            def buildStatus = currentBuild.result ?: 'SUCCESS'
+            def statusIcon = buildStatus == 'SUCCESS' ? '✅' : '❌'
+            def currentTime = new Date().format("yyyy-MM-dd HH:mm:ss")
+
+            emailext(
+                subject: "[${buildStatus}] 🛡️ Aalai Frontend V.0.3 Security Scan #${env.BUILD_NUMBER} ${statusIcon}",
+                body: """
+                    <!DOCTYPE html>
+                    <html lang="en">
+                    <head>
+                        <meta charset="UTF-8">
+                        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                        <title>Security Scan Results - Aalai Frontend V.0.3</title>
+                        <style>
+                            * { 
+                                margin: 0; 
+                                padding: 0; 
+                                box-sizing: border-box; 
+                            }
+                            
+                            body { 
+                                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+                                background-color: #0a0a0a;
+                                color: #f8fafc; 
+                                line-height: 1.6; 
+                                margin: 0;
+                                padding: 20px 0;
+                            }
+                            
+                            .email-container {
+                                width: 100%;
+                                max-width: 700px;
+                                margin: 0 auto;
+                                background-color: #ffffff;
+                            }
+                            
+                            .container { 
+                                width: 100%;
+                                background: linear-gradient(180deg, #1a1a1a 0%, #2c0f12 100%);
+                                border-radius: 0;
+                                overflow: hidden;
+                                border: 3px solid #b11e25;
+                            }
+                            
+                            .header { 
+                                background: linear-gradient(135deg, #2c0f12 0%, #b11e25 50%, #8b1538 100%);
+                                padding: 45px 40px; 
+                                text-align: center; 
+                                color: #ffffff; 
+                                position: relative;
+                            }
+                            
+                            .header-accent {
+                                position: absolute;
+                                bottom: 0;
+                                left: 0;
+                                right: 0;
+                                height: 8px;
+                                background: ${buildStatus == 'SUCCESS' ? 
+                                    'linear-gradient(90deg, #10b981 0%, #059669 100%)' : 
+                                    'linear-gradient(90deg, #ef4444 0%, #dc2626 100%)'};
+                            }
+                            
+                            .header h1 { 
+                                font-size: 32px; 
+                                font-weight: 800; 
+                                margin: 0 0 15px 0; 
+                                color: #ffffff;
+                                text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+                            }
+                            
+                            .header .subtitle { 
+                                font-size: 18px; 
+                                font-weight: 500;
+                                color: #f1f5f9;
+                                margin: 0;
+                            }
+                            
+                            .shield-icon { 
+                                font-size: 42px;
+                                margin-right: 12px;
+                                vertical-align: middle;
+                            }
+                            
+                            .content { 
+                                padding: 40px;
+                                background-color: #1e1e1e;
+                            }
+                            
+                            .status-banner { 
+                                border-radius: 12px; 
+                                padding: 35px 30px; 
+                                margin-bottom: 35px; 
+                                text-align: center; 
+                                background: ${buildStatus == 'SUCCESS' ? 
+                                    'linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%)' : 
+                                    'linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%)'};
+                                border: 3px solid ${buildStatus == 'SUCCESS' ? '#22c55e' : '#ef4444'};
+                            }
+                            
+                            .status-content {
+                                display: table;
+                                margin: 0 auto;
+                            }
+                            
+                            .status-icon { 
+                                font-size: 52px;
+                                margin-bottom: 15px;
+                                display: block;
+                            }
+                            
+                            .status-text { 
+                                font-size: 26px; 
+                                font-weight: 800; 
+                                color: ${buildStatus == 'SUCCESS' ? '#065f46' : '#991b1b'};
+                                margin-bottom: 10px;
+                            }
+                            
+                            .security-score { 
+                                display: inline-block; 
+                                background: ${buildStatus == 'SUCCESS' ? 
+                                    'linear-gradient(135deg, #10b981 0%, #059669 100%)' : 
+                                    'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)'};
+                                color: #ffffff; 
+                                padding: 10px 20px; 
+                                border-radius: 30px; 
+                                font-size: 14px; 
+                                font-weight: 700; 
+                                text-transform: uppercase;
+                                letter-spacing: 1px;
+                                margin-top: 10px;
+                            }
+                            
+                            .scan-info { 
+                                background: linear-gradient(135deg, #2c0f12 0%, #3d1a1e 100%);
+                                border-radius: 12px; 
+                                padding: 35px; 
+                                margin: 35px 0; 
+                                border: 2px solid #b11e25;
+                            }
+                            
+                            .info-table {
+                                width: 100%;
+                                border-collapse: collapse;
+                            }
+                            
+                            .info-row td { 
+                                padding: 18px 0; 
+                                border-bottom: 1px solid rgba(177, 30, 37, 0.3);
+                                vertical-align: top;
+                            }
+                            
+                            .info-row:last-child td { 
+                                border-bottom: none; 
+                            }
+                            
+                            .info-label { 
+                                width: 35%;
+                                font-weight: 700; 
+                                color: #b11e25; 
+                                font-size: 16px;
+                                padding-right: 20px;
+                            }
+                            
+                            .info-value { 
+                                color: #f8fafc; 
+                                font-weight: 600;
+                                font-size: 16px;
+                            }
+                            
+                            .success-value { color: #10b981; }
+                            .failure-value { color: #ef4444; }
+                            
+                            .reports-section { 
+                                margin: 40px 0; 
+                            }
+                            
+                            .section-title { 
+                                font-size: 24px; 
+                                font-weight: 800; 
+                                color: #f8fafc; 
+                                margin-bottom: 25px; 
+                                padding-bottom: 15px; 
+                                border-bottom: 4px solid #b11e25;
+                                position: relative;
+                            }
+                            
+                            .section-accent {
+                                position: absolute;
+                                bottom: -4px;
+                                left: 0;
+                                width: 80px;
+                                height: 4px;
+                                background: linear-gradient(90deg, #fbbf24 0%, #f59e0b 100%);
+                            }
+                            
+                            .report-links { 
+                                margin-top: 25px;
+                            }
+                            
+                            .report-link { 
+                                display: block;
+                                padding: 25px 30px; 
+                                background: linear-gradient(135deg, #1e1e1e 0%, #2c0f12 100%);
+                                border: 2px solid #b11e25;
+                                border-radius: 12px; 
+                                text-decoration: none; 
+                                color: #f8fafc; 
+                                margin-bottom: 15px;
+                                transition: all 0.3s ease;
+                            }
+                            
+                            .report-link:hover { 
+                                background: linear-gradient(135deg, #2c0f12 0%, #b11e25 100%);
+                                border-color: #dc2626;
+                                transform: translateY(-2px);
+                            }
+                            
+                            .link-content {
+                                display: table;
+                                width: 100%;
+                            }
+                            
+                            .link-icon { 
+                                display: table-cell;
+                                width: 50px;
+                                font-size: 28px; 
+                                vertical-align: middle;
+                                padding-right: 20px;
+                            }
+                            
+                            .link-text { 
+                                display: table-cell;
+                                font-weight: 600;
+                                font-size: 16px;
+                                vertical-align: middle;
+                                line-height: 1.4;
+                            }
+                            
+                            .note { 
+                                background: linear-gradient(135deg, #451a03 0%, #78350f 100%);
+                                border-left: 6px solid #f59e0b; 
+                                padding: 25px 30px; 
+                                margin: 35px 0; 
+                                border-radius: 8px; 
+                                color: #fbbf24;
+                                border-right: 1px solid #f59e0b;
+                                border-top: 1px solid #f59e0b;
+                                border-bottom: 1px solid #f59e0b;
+                            }
+                            
+                            .note p {
+                                margin: 0;
+                                font-size: 15px;
+                                font-weight: 500;
+                                line-height: 1.6;
+                            }
+                            
+                            .footer { 
+                                padding: 35px 40px; 
+                                text-align: center; 
+                                background: linear-gradient(135deg, #1a1a1a 0%, #2c0f12 100%);
+                                border-top: 2px solid #b11e25;
+                            }
+                            
+                            .footer p {
+                                margin: 8px 0;
+                                font-size: 14px;
+                            }
+                            
+                            .footer .primary {
+                                font-weight: 700;
+                                color: #b11e25;
+                                font-size: 16px;
+                            }
+                            
+                            .footer .secondary {
+                                color: #94a3b8;
+                                font-weight: 500;
+                            }
+                            
+                            /* Email client compatibility */
+                            table { border-collapse: collapse; }
+                            img { border: 0; outline: none; text-decoration: none; }
+                            
+                            /* Mobile responsiveness */
+                            @media only screen and (max-width: 600px) {
+                                .email-container { width: 100% !important; }
+                                .container { border-radius: 0 !important; }
+                                .content, .header, .footer { padding: 25px !important; }
+                                .header h1 { font-size: 24px !important; }
+                                .status-text { font-size: 20px !important; }
+                                .section-title { font-size: 20px !important; }
+                                .link-content { display: block !important; }
+                                .link-icon { 
+                                    display: block !important; 
+                                    width: auto !important;
+                                    margin-bottom: 10px;
+                                    text-align: center;
+                                }
+                                .link-text { 
+                                    display: block !important; 
+                                    text-align: center;
+                                }
+                                .info-label { 
+                                    display: block;
+                                    width: 100% !important;
+                                    padding-bottom: 8px;
+                                }
+                                .info-value { 
+                                    display: block; 
+                                }
+                            }
+                        </style>
+                    </head>
+                    <body>
+                        <div class="email-container">
+                            <div class="container">
+                                <div class="header">
+                                    <h1><span class="shield-icon">🛡️</span>Aalai Frontend Security Scan</h1>
+                                    <p class="subtitle">Version 0.3 • Build #${env.BUILD_NUMBER}</p>
+                                    <div class="header-accent"></div>
+                                </div>
+                                
+                                <div class="content">
+                                    <div class="status-banner">
+                                        <div class="status-content">
+                                            <div class="status-icon">${statusIcon}</div>
+                                            <div class="status-text">Security Scan ${buildStatus}</div>
+                                            <div class="security-score">${buildStatus == 'SUCCESS' ? 'PASSED' : 'ISSUES DETECTED'}</div>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="scan-info">
+                                        <table class="info-table">
+                                            <tr class="info-row">
+                                                <td class="info-label">Project:</td>
+                                                <td class="info-value">Aalai Frontend V.0.3</td>
+                                            </tr>
+                                            <tr class="info-row">
+                                                <td class="info-label">Scan ID:</td>
+                                                <td class="info-value">#${env.BUILD_NUMBER}</td>
+                                            </tr>
+                                            <tr class="info-row">
+                                                <td class="info-label">Status:</td>
+                                                <td class="info-value ${buildStatus == 'SUCCESS' ? 'success-value' : 'failure-value'}">${buildStatus}</td>
+                                            </tr>
+                                            <tr class="info-row">
+                                                <td class="info-label">Completed:</td>
+                                                <td class="info-value">${currentTime}</td>
+                                            </tr>
+                                            <tr class="info-row">
+                                                <td class="info-label">Jenkins URL:</td>
+                                                <td class="info-value"><a href="${env.BUILD_URL}" style="color: #3b82f6; text-decoration: none;">View Build Details</a></td>
+                                            </tr>
+                                        </table>
+                                    </div>
+                                    
+                                    <div class="reports-section">
+                                        <div class="section-title">
+                                            📊 Security Reports
+                                            <div class="section-accent"></div>
+                                        </div>
+                                        
+                                        <div class="report-links">
+                                            <a href="${env.BUILD_URL}artifact/frontend-gitleaks-reports/gitleaks-report.sarif" class="report-link">
+                                                <div class="link-content">
+                                                    <div class="link-icon">🔍</div>
+                                                    <div class="link-text">
+                                                        <strong>GitLeaks Report</strong><br>
+                                                        Secrets detection and credential scanning results
+                                                    </div>
+                                                </div>
+                                            </a>
+                                            
+                                            <a href="${env.BUILD_URL}artifact/frontend-trivy-reports/" class="report-link">
+                                                <div class="link-content">
+                                                    <div class="link-icon">🐳</div>
+                                                    <div class="link-text">
+                                                        <strong>Trivy Security Scan</strong><br>
+                                                        Vulnerability assessment and dependency analysis
+                                                    </div>
+                                                </div>
+                                            </a>
+                                            
+                                            <a href="http://185.100.212.76:12345/dashboard?id=Aalai_Fronend_V.0.3" class="report-link">
+                                                <div class="link-content">
+                                                    <div class="link-icon">📈</div>
+                                                    <div class="link-text">
+                                                        <strong>SonarQube Dashboard</strong><br>
+                                                        Code quality metrics and security hotspots analysis
+                                                    </div>
+                                                </div>
+                                            </a>
+                                            
+                                            <a href="${env.BUILD_URL}console" class="report-link">
+                                                <div class="link-content">
+                                                    <div class="link-icon">📋</div>
+                                                    <div class="link-text">
+                                                        <strong>Build Console Output</strong><br>
+                                                        Detailed logs and execution trace
+                                                    </div>
+                                                </div>
+                                            </a>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="note">
+                                        <p>📎 <strong>Attached Files:</strong> SARIF format reports are included with this email. These structured reports can be imported into security tools or viewed in IDEs like VS Code with the SARIF viewer extension for detailed analysis.</p>
+                                    </div>
+                                </div>
+                                
+                                <div class="footer">
+                                    <p class="primary">Automated Security Scan Report</p>
+                                    <p class="secondary">Jenkins CI/CD Pipeline • Aalai Security Team</p>
+                                    <p class="secondary">Contact: <strong>DevOps/QA Team.</strong> | Reply-To: <strong>marikannan@hexrfactory.com</strong></p>
+                                    <p class="secondary">Generated: ${currentTime} • Build: #${env.BUILD_NUMBER}</p>
+                                </div>
+                            </div>
+                        </div>
+                    </body>
+                    </html>
+                """,
+                to: "marikannan@hexrfactory.com, vishnu@hexrfactory.com, rithish@hexrfactory.com, jerald@hexrfactory.com, ramkumar@hexrfactory.com",
+                mimeType: 'text/html',
+                replyTo: "marikannan@hexrfactory.com",
+                from: '$SMTP_CREDENTIALS_USR',
+                attachmentsPattern: "frontend-gitleaks-reports/*.sarif, frontend-trivy-reports/*.sarif"
+            )
+
+            archiveArtifacts artifacts: 'frontend-gitleaks-reports/**, frontend-trivy-reports/**', allowEmptyArchive: true
+        }
+    }
+}
+}

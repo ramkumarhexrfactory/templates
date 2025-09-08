@@ -1,0 +1,731 @@
+pipeline {
+    agent {
+        label 'remote-server-agent'
+    }
+    triggers {
+        GenericTrigger(
+            genericVariables: [
+                [key: 'ref', value: '$.ref'],
+                [key: 'commit', value: '$.after'],
+                [key: 'author', value: '$.commits[0].author.name']
+            ],
+            causeString: 'Triggered by commit on $ref by $author',
+            token: 'dwinzoOrgDwinzoBackend',
+            printContributedVariables: true,
+            printPostContent: true,
+            regexpFilterText: '$ref',
+            regexpFilterExpression: '^refs/heads/Bkd_9901$'
+        )
+    }
+    environment {
+        GIT_CREDENTIALS = credentials('ramkumarp')
+        DOCKER_COMPOSE = 'docker-compose'
+        COMPOSE_PROJECT_NAME = 'aalai_backend_demo'
+        MAIN_CONTAINER = 'aalai_demo_api_end'
+        SOCKET_CONTAINER = 'aalai_demo_socket_end'
+        MONGO_CONTAINER = 'aalai_demo_mongo'
+        GRAFANA_CONTAINER = 'grafana'
+        PROMETHEUS_CONTAINER = 'prometheus'
+        NETWORK_NAME = 'DwinzoMajor'
+        SMTP_CREDENTIALS = credentials('smtp-credentials-gmail')
+    }
+    stages {
+        stage('Source') {
+            steps {
+                cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+                script {
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: '*/Bkd_9901']],
+                        userRemoteConfigs: [[
+                            url: 'http://ramkumar@hexrfactory.com:Ramkumar@123@185.100.212.76:7778/Dwinzo/Dwinzo-Backend.git',
+                            credentialsId: env.GIT_CREDENTIALS
+                        ]]
+                    ])
+                }
+            }
+        }
+        stage('Build & Clean Old Containers') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Cleaning old containers..."
+                        foreach ($container in @("$env:MAIN_CONTAINER", "$env:SOCKET_CONTAINER", "$env:MONGO_CONTAINER", "$env:GRAFANA_CONTAINER", "$env:PROMETHEUS_CONTAINER")) {
+                            $cid = docker ps -aq -f "name=$container"
+                            if ($cid) {
+                                docker stop $cid | Out-Null
+                                docker rm $cid | Out-Null
+                            }
+                        }
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        $env:COMPOSE_PROJECT_NAME = "$env:COMPOSE_PROJECT_NAME"
+                        docker-compose down --remove-orphans 2>$null
+                        Write-Host "Old containers removed."
+                    '''
+                    powershell '''
+                        Write-Host "Building all containers..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        $env:COMPOSE_PROJECT_NAME = "$env:COMPOSE_PROJECT_NAME"
+                        docker-compose build --no-cache
+                    '''
+                }
+            }
+        }
+        stage('Deploy All Services') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Deploying API, Socket, Mongo, Prometheus, Grafana..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        $env:COMPOSE_PROJECT_NAME = "$env:COMPOSE_PROJECT_NAME"
+                        docker-compose up -d
+                        Start-Sleep -Seconds 30
+                        Write-Host "Containers deployed successfully."
+                    '''
+                }
+            }
+        }
+    }
+    post {
+        always {
+            script {
+                // Safely define dynamic values
+                def buildResult = currentBuild.result ?: 'SUCCESS'
+                def buildNumber = env.BUILD_NUMBER
+                def buildDuration = currentBuild.durationString.replace(' and counting', '')
+                def buildTime = new Date().format("MMM dd, yyyy - HH:mm")
+                def branchName = ref ? ref.replace('refs/heads/', '') : 'N/A'
+                def lastCommit = commit ? commit.substring(0, 7) : 'N/A'
+                def triggerAuthor = author ?: 'N/A'
+                def currentYear = new Date().format("yyyy")
+
+                // Create the email body with improved design
+                def emailBody = """
+                        <!DOCTYPE html>
+                        <html lang="en">
+                        <head>
+                            <meta charset="UTF-8">
+                            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                            <title>Deployment Dashboard - Email Version</title>
+                            <!--[if mso]>
+                            <noscript>
+                                <xml>
+                                    <o:OfficeDocumentSettings>
+                                        <o:PixelsPerInch>96</o:PixelsPerInch>
+                                    </o:OfficeDocumentSettings>
+                                </xml>
+                            </noscript>
+                            <![endif]-->
+                            <style>
+                                /* Reset styles for email compatibility */
+                                body, table, td, p, a, li, blockquote {
+                                    -webkit-text-size-adjust: 100%;
+                                    -ms-text-size-adjust: 100%;
+                                }
+                                
+                                table, td {
+                                    mso-table-lspace: 0pt;
+                                    mso-table-rspace: 0pt;
+                                }
+                                
+                                img {
+                                    -ms-interpolation-mode: bicubic;
+                                }
+                                
+                                /* Main styles */
+                                body {
+                                    margin: 0;
+                                    padding: 0;
+                                    width: 100% !important;
+                                    min-width: 100%;
+                                    background-color: #EDF7F6;
+                                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, Arial, sans-serif;
+                                }
+                                
+                                table {
+                                    border-collapse: collapse;
+                                }
+                                
+                                .container {
+                                    max-width: 600px;
+                                    margin: 0 auto;
+                                    background-color: #EDF7F6;
+                                }
+                                
+                                .header-table {
+                                    width: 100%;
+                                    background-color: #FFFFFF;
+                                    border-radius: 12px;
+                                    margin: 20px 0;
+                                }
+                                
+                                .logo-cell {
+                                    padding: 20px;
+                                    vertical-align: middle;
+                                }
+                                
+                                .logo-icon {
+                                    display: inline-block;
+                                    width: 42px;
+                                    height: 42px;
+                                    background: linear-gradient(135deg, #71E2F5 0%, #BDF9EF 100%);
+                                    background-color: #71E2F5; /* Fallback */
+                                    border-radius: 10px;
+                                    text-align: center;
+                                    line-height: 42px;
+                                    color: white;
+                                    font-size: 20px;
+                                    font-weight: bold;
+                                    margin-right: 12px;
+                                    vertical-align: middle;
+                                }
+                                
+                                .logo-text {
+                                    font-size: 24px;
+                                    font-weight: 700;
+                                    color: #71E2F5;
+                                    vertical-align: middle;
+                                }
+                                
+                                .header-info {
+                                    text-align: right;
+                                    padding: 20px;
+                                    vertical-align: middle;
+                                }
+                                
+                                .header-title {
+                                    font-size: 28px;
+                                    color: #2D3748;
+                                    margin: 0 0 4px 0;
+                                    font-weight: bold;
+                                }
+                                
+                                .header-subtitle {
+                                    color: #718096;
+                                    font-size: 14px;
+                                    margin: 0;
+                                }
+                                
+                                .card {
+                                    width: 100%;
+                                    background-color: #FFFFFF;
+                                    border-radius: 12px;
+                                    margin: 24px 0;
+                                }
+                                
+                                .card-header {
+                                    padding: 24px 24px 16px 24px;
+                                    border-bottom: 1px solid #EDF2F7;
+                                }
+                                
+                                .card-title {
+                                    font-size: 18px;
+                                    font-weight: 600;
+                                    color: #2D3748;
+                                    margin: 0;
+                                }
+                                
+                                .card-title-icon {
+                                    color: #71E2F5;
+                                    font-size: 20px;
+                                    margin-right: 10px;
+                                }
+                                
+                                .status-badge {
+                                    background-color: #C6F7E2;
+                                    color: #0F9D58;
+                                    padding: 6px 12px;
+                                    border-radius: 20px;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    float: right;
+                                }
+                                
+                                .status-running {
+                                    background-color: #BDE3FF;
+                                    color: #1A73E8;
+                                }
+                                
+                                .card-content {
+                                    padding: 20px 24px 24px 24px;
+                                }
+                                
+                                .info-table {
+                                    width: 100%;
+                                }
+                                
+                                .info-row td {
+                                    padding: 8px 0;
+                                    vertical-align: top;
+                                }
+                                
+                                .info-label {
+                                    font-size: 12px;
+                                    color: #718096;
+                                    font-weight: 500;
+                                    width: 50%;
+                                    padding-right: 16px;
+                                }
+                                
+                                .info-value {
+                                    font-size: 16px;
+                                    font-weight: 600;
+                                    color: #2D3748;
+                                    width: 50%;
+                                }
+                                
+                                .summary-table {
+                                    width: 100%;
+                                }
+                                
+                                .summary-row {
+                                    border-bottom: 1px solid #E2E8F0;
+                                }
+                                
+                                .summary-row:last-child {
+                                    border-bottom: none;
+                                }
+                                
+                                .summary-row td {
+                                    padding: 12px 0;
+                                    vertical-align: middle;
+                                }
+                                
+                                .summary-icon {
+                                    width: 32px;
+                                    height: 32px;
+                                    background-color: #EDF7F6;
+                                    border-radius: 8px;
+                                    text-align: center;
+                                    line-height: 32px;
+                                    color: #71E2F5;
+                                    font-weight: bold;
+                                    margin-right: 12px;
+                                }
+                                
+                                .summary-text {
+                                    font-size: 14px;
+                                    color: #2D3748;
+                                }
+                                
+                                .services-container {
+                                    padding: 0 24px 24px 24px;
+                                }
+                                
+                                .service-table {
+                                    width: 100%;
+                                    margin-bottom: 16px;
+                                }
+                                
+                                .service-card {
+                                    background-color: #F7FAFC;
+                                    border: 1px solid #E2E8F0;
+                                    border-radius: 10px;
+                                    margin-bottom: 16px;
+                                    text-align: center;
+                                }
+                                
+                                .service-header {
+                                    padding: 16px;
+                                }
+                                
+                                .service-icon {
+                                    display: inline-block;
+                                    width: 50px;
+                                    height: 50px;
+                                    background: linear-gradient(135deg, #71E2F5 0%, #BDF9EF 100%);
+                                    background-color: #71E2F5; /* Fallback */
+                                    border-radius: 50%;
+                                    text-align: center;
+                                    line-height: 50px;
+                                    color: white;
+                                    font-size: 20px;
+                                    font-weight: bold;
+                                    margin-bottom: 12px;
+                                }
+                                
+                                .service-name {
+                                    font-size: 16px;
+                                    font-weight: 600;
+                                    color: #2D3748;
+                                    margin: 0 0 8px 0;
+                                }
+                                
+                                .service-desc {
+                                    font-size: 12px;
+                                    color: #718096;
+                                    margin: 0 0 12px 0;
+                                }
+                                
+                                .service-status {
+                                    margin-bottom: 12px;
+                                }
+                                
+                                .service-link {
+                                    display: inline-block;
+                                    padding: 6px 12px;
+                                    background-color: #FFA8B6;
+                                    color: white !important;
+                                    text-decoration: none;
+                                    border-radius: 4px;
+                                    font-size: 12px;
+                                    font-weight: 500;
+                                }
+                                
+                                .actions-table {
+                                    width: 100%;
+                                    margin: 24px 0;
+                                    text-align: center;
+                                }
+                                
+                                .btn {
+                                    display: inline-block;
+                                    padding: 12px 24px;
+                                    border-radius: 8px;
+                                    font-weight: 600;
+                                    text-decoration: none;
+                                    margin: 0 8px;
+                                }
+                                
+                                .btn-primary {
+                                    background: linear-gradient(135deg, #71E2F5 0%, #BDF9EF 100%);
+                                    background-color: #71E2F5; /* Fallback */
+                                    color: white !important;
+                                }
+                                
+                                .btn-secondary {
+                                    background-color: #FFFFFF;
+                                    color: #71E2F5 !important;
+                                    border: 1px solid #71E2F5;
+                                }
+                                
+                                .footer {
+                                    text-align: center;
+                                    padding: 20px;
+                                    color: #718096;
+                                    font-size: 14px;
+                                }
+                                
+                                /* Mobile responsive */
+                                @media only screen and (max-width: 480px) {
+                                    .container {
+                                        width: 100% !important;
+                                        min-width: 100% !important;
+                                    }
+                                    
+                                    .header-table,
+                                    .card {
+                                        margin: 10px !important;
+                                        border-radius: 8px !important;
+                                    }
+                                    
+                                    .header-info {
+                                        text-align: center !important;
+                                    }
+                                    
+                                    .header-title {
+                                        font-size: 24px !important;
+                                    }
+                                    
+                                    .info-label,
+                                    .info-value {
+                                        display: block !important;
+                                        width: 100% !important;
+                                        padding-right: 0 !important;
+                                    }
+                                    
+                                    .info-label {
+                                        padding-bottom: 4px !important;
+                                    }
+                                    
+                                    .info-value {
+                                        padding-bottom: 12px !important;
+                                    }
+                                    
+                                    .btn {
+                                        display: block !important;
+                                        margin: 8px 0 !important;
+                                    }
+                                    
+                                    /* Stack cards vertically on mobile */
+                                    table[role="presentation"] td[style*="width: 48%"] {
+                                        display: block !important;
+                                        width: 100% !important;
+                                        padding: 0 !important;
+                                        margin-bottom: 16px !important;
+                                    }
+                                    
+                                    /* Stack services vertically on mobile */
+                                    table[role="presentation"] td[style*="width: 20%"] {
+                                        display: block !important;
+                                        width: 100% !important;
+                                        padding: 8px 0 !important;
+                                    }
+                                }
+                            </style>
+                        </head>
+                        <body>
+                            <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                                <tr>
+                                    <td>
+                                        <div class="container">
+                                            <!-- Header -->
+                                            <table role="presentation" class="header-table" cellspacing="0" cellpadding="0" border="0">
+                                                <tr>
+                                                    <td class="logo-cell">
+                                                        <span class="logo-icon">🚀</span>
+                                                        <span class="logo-text">DeployFlow</span>
+                                                    </td>
+                                                    <td class="header-info">
+                                                        <h1 class="header-title">Aalai Backend V.0.3</h1>
+                                                        <p class="header-subtitle">Deployment Dashboard & Monitoring</p>
+                                                    </td>
+                                                </tr>
+                                            </table>
+                                            
+                                            <!-- Deployment Information Card -->
+                                            <table role="presentation" class="card" cellspacing="0" cellpadding="0" border="0">
+                                                <tr>
+                                                    <td class="card-header">
+                                                        <h2 class="card-title">
+                                                            <span class="card-title-icon">ℹ️</span>Deployment Information
+                                                        </h2>
+                                                        <span class="status-badge">SUCCESS</span>
+                                                    </td>
+                                                </tr>
+                                                <tr>
+                                                    <td class="card-content">
+                                                        <table role="presentation" class="info-table" cellspacing="0" cellpadding="0" border="0">
+                                                            <tr class="info-row">
+                                                                <td class="info-label">Project Name</td>
+                                                                <td class="info-value">Aalai Backend V.0.3</td>
+                                                            </tr>
+                                                            <tr class="info-row">
+                                                                <td class="info-label">Build Number</td>
+                                                                <td class="info-value">#427</td>
+                                                            </tr>
+                                                            <tr class="info-row">
+                                                                <td class="info-label">Branch</td>
+                                                                <td class="info-value">Bkd_9901</td>
+                                                            </tr>
+                                                            <tr class="info-row">
+                                                                <td class="info-label">Deployment Duration</td>
+                                                                <td class="info-value">12 minutes 34 seconds</td>
+                                                            </tr>
+                                                            <tr class="info-row">
+                                                                <td class="info-label">Deployed On</td>
+                                                                <td class="info-value">remote-server-agent</td>
+                                                            </tr>
+                                                            <tr class="info-row">
+                                                                <td class="info-label">Network</td>
+                                                                <td class="info-value">DwinzoMajor</td>
+                                                            </tr>
+                                                        </table>
+                                                    </td>
+                                                </tr>
+                                            </table>
+                                            
+                                            <!-- Source Information Card -->
+                                            <table role="presentation" class="card" cellspacing="0" cellpadding="0" border="0">
+                                                <tr>
+                                                    <td class="card-header">
+                                                        <h2 class="card-title">
+                                                            <span class="card-title-icon">🌿</span>Source Information
+                                                        </h2>
+                                                    </td>
+                                                </tr>
+                                                <tr>
+                                                    <td class="card-content">
+                                                        <table role="presentation" class="info-table" cellspacing="0" cellpadding="0" border="0">
+                                                            <tr class="info-row">
+                                                                <td class="info-label">Repository</td>
+                                                                <td class="info-value">Dwinzo/Dwinzo-Backend.git</td>
+                                                            </tr>
+                                                            <tr class="info-row">
+                                                                <td class="info-label">Triggered By</td>
+                                                                <td class="info-value">ramkumar@hexrfactory.com</td>
+                                                            </tr>
+                                                            <tr class="info-row">
+                                                                <td class="info-label">Last Commit</td>
+                                                                <td class="info-value">a1b2c3d4</td>
+                                                            </tr>
+                                                            <tr class="info-row">
+                                                                <td class="info-label">Build Time</td>
+                                                                <td class="info-value">Oct 15, 2023 - 14:23 UTC</td>
+                                                            </tr>
+                                                        </table>
+                                                    </td>
+                                                </tr>
+                                            </table>
+                                            
+                                            <!-- Build Summary Card -->
+                                            <table role="presentation" class="card" cellspacing="0" cellpadding="0" border="0">
+                                                <tr>
+                                                    <td class="card-header">
+                                                        <h2 class="card-title">
+                                                            <span class="card-title-icon">📋</span>Build Summary
+                                                        </h2>
+                                                    </td>
+                                                </tr>
+                                                <tr>
+                                                    <td class="card-content">
+                                                        <table role="presentation" class="summary-table" cellspacing="0" cellpadding="0" border="0">
+                                                            <tr class="summary-row">
+                                                                <td>
+                                                                    <span class="summary-icon">✓</span>
+                                                                </td>
+                                                                <td class="summary-text">
+                                                                    All old containers were cleaned before deployment
+                                                                </td>
+                                                            </tr>
+                                                            <tr class="summary-row">
+                                                                <td>
+                                                                    <span class="summary-icon">✓</span>
+                                                                </td>
+                                                                <td class="summary-text">
+                                                                    All services were built with no-cache option
+                                                                </td>
+                                                            </tr>
+                                                            <tr class="summary-row">
+                                                                <td>
+                                                                    <span class="summary-icon">✓</span>
+                                                                </td>
+                                                                <td class="summary-text">
+                                                                    All containers deployed successfully to DwinzoMajor network
+                                                                </td>
+                                                            </tr>
+                                                            <tr class="summary-row">
+                                                                <td>
+                                                                    <span class="summary-icon">✓</span>
+                                                                </td>
+                                                                <td class="summary-text">
+                                                                    Services are running in detached mode
+                                                                </td>
+                                                            </tr>
+                                                        </table>
+                                                    </td>
+                                                </tr>
+                                            </table>
+                                            
+                                            <!-- Deployed Services Card -->
+                                            <table role="presentation" class="card" cellspacing="0" cellpadding="0" border="0">
+                                                <tr>
+                                                    <td class="card-header">
+                                                        <h2 class="card-title">
+                                                            <span class="card-title-icon">🖥️</span>Deployed Services
+                                                        </h2>
+                                                    </td>
+                                                </tr>
+                                                <tr>
+                                                    <td class="services-container">
+                                                        <!-- API Service -->
+                                                        <div class="service-card">
+                                                            <div class="service-header">
+                                                                <div class="service-icon">🌐</div>
+                                                                <h3 class="service-name">API Service</h3>
+                                                                <p class="service-desc">Primary backend API endpoint</p>
+                                                                <div class="service-status">
+                                                                    <span class="status-badge status-running">RUNNING</span>
+                                                                </div>
+                                                                <a href="http://185.100.212.76:9941" class="service-link">Port: 9941</a>
+                                                            </div>
+                                                        </div>
+                                                        
+                                                        <!-- Socket Service -->
+                                                        <div class="service-card">
+                                                            <div class="service-header">
+                                                                <div class="service-icon">🔌</div>
+                                                                <h3 class="service-name">Socket Service</h3>
+                                                                <p class="service-desc">Real-time communication</p>
+                                                                <div class="service-status">
+                                                                    <span class="status-badge status-running">RUNNING</span>
+                                                                </div>
+                                                                <a href="http://185.100.212.76:9942" class="service-link">Port: 9942</a>
+                                                            </div>
+                                                        </div>
+                                                        
+                                                        <!-- MongoDB -->
+                                                        <div class="service-card">
+                                                            <div class="service-header">
+                                                                <div class="service-icon">🗄️</div>
+                                                                <h3 class="service-name">MongoDB</h3>
+                                                                <p class="service-desc">NoSQL database service</p>
+                                                                <div class="service-status">
+                                                                    <span class="status-badge status-running">RUNNING</span>
+                                                                </div>
+                                                                <a href="http://185.100.212.76:9903" class="service-link">Port: 9903</a>
+                                                            </div>
+                                                        </div>
+                                                        
+                                                        <!-- Grafana -->
+                                                        <div class="service-card">
+                                                            <div class="service-header">
+                                                                <div class="service-icon">📊</div>
+                                                                <h3 class="service-name">Grafana</h3>
+                                                                <p class="service-desc">Monitoring dashboard</p>
+                                                                <div class="service-status">
+                                                                    <span class="status-badge status-running">RUNNING</span>
+                                                                </div>
+                                                                <a href="http://185.100.212.76:5678" class="service-link">Port: 5678</a>
+                                                            </div>
+                                                        </div>
+                                                        
+                                                        <!-- Prometheus -->
+                                                        <div class="service-card">
+                                                            <div class="service-header">
+                                                                <div class="service-icon">📈</div>
+                                                                <h3 class="service-name">Prometheus</h3>
+                                                                <p class="service-desc">Metrics collection</p>
+                                                                <div class="service-status">
+                                                                    <span class="status-badge status-running">RUNNING</span>
+                                                                </div>
+                                                                <a href="http://185.100.212.76:6789" class="service-link">Port: 6789</a>
+                                                            </div>
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            </table>
+                                            
+                                            <!-- Action Buttons -->
+                                            <table role="presentation" class="actions-table" cellspacing="0" cellpadding="0" border="0">
+                                                <tr>
+                                                    <td>
+                                                        <a href="http://185.100.212.76:8080" class="btn btn-primary">
+                                                            🔗 View Build Details
+                                                        </a>
+                                                        <a href="http://185.100.212.76:8080" class="btn btn-secondary">
+                                                            📥 Download Logs
+                                                        </a>
+                                                    </td>
+                                                </tr>
+                                            </table>
+                                            
+                                            <!-- Footer -->
+                                            <div class="footer">
+                                                <p>This is an automated message from Jenkins CI/CD System. Please do not reply to this email.</p>
+                                                <p>© 2023 HexaFactory - All Rights Reserved</p>
+                                            </div>
+                                        </div>
+                                    </td>
+                                </tr>
+                            </table>
+                        </body>
+                        </html>
+                        """
+
+                // Send email
+                emailext(
+                    subject: "🚀 Aalai Backend V.0.3 - Build ${env.BUILD_NUMBER} | ${buildResult}",
+                    body: emailBody,
+                    to: "marikannan@hexrfactory.com, rithish@hexrfactory.com, sabarinathan@hexrfactory.com, nivetha@hexrfactory.com, ramkumar@hexrfactory.com",
+                    attachLog: true,
+                    mimeType: 'text/html',
+                    replyTo: "marikannan@hexrfactory.com",
+                    from: env.SMTP_CREDENTIALS_USR
+                )
+
+                cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+            }
+        }
+    }
+}

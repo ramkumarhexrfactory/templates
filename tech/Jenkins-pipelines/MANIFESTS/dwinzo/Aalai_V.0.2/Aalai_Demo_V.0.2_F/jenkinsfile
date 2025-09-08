@@ -1,0 +1,132 @@
+pipeline {
+    agent {
+        label 'remote-server-agent'
+    }
+
+    triggers {
+        GenericTrigger(
+            genericVariables: [
+                [key: 'ref', value: '$.ref'],
+                [key: 'commit', value: '$.after'],
+                [key: 'author', value: '$.commits[0].author.name']
+            ],
+            causeString: 'Triggered by commit on $ref by $author',
+            token: 'dwinzoBetaDwinzoDemo',
+            printContributedVariables: true,
+            printPostContent: true,
+            regexpFilterText: '$ref',
+            regexpFilterExpression: '^refs/heads/main$'
+        )
+    }
+
+    environment {
+        GIT_CREDENTIALS = credentials('ramkumarp')
+        DOCKER_COMPOSE = 'docker-compose'
+        APP_NAME = 'Dwinzo-Beta/Dwinzo_Demo'
+        MAIN_CONTAINER = 'aalai-beta-Demo'
+        WEBSITE_URL = 'http://185.100.212.76:8300'
+        SMTP_CREDENTIALS = credentials('smtp-credentials-gmail')
+    }
+
+    stages {
+        stage('Source') {
+            steps {
+                cleanWs(deleteDirs: true)
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: '*/main']],
+                    userRemoteConfigs: [[
+                        url: 'http://185.100.212.76:7778/Dwinzo-Beta/Dwinzo_Demo.git',
+                        credentialsId: env.GIT_CREDENTIALS
+                    ]]
+                ])
+            }
+        }
+
+        stage('Build') {
+            steps {
+                script {
+                    powershell '''
+                        docker-compose build --no-cache
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                script {
+                    powershell '''
+                  Write-Host "♻️ Stopping and removing old container if it exists..."
+                        $containerExists = docker ps -a -q -f "name=$env:MAIN_CONTAINER"
+                        if ($containerExists) {
+                            docker stop $env:MAIN_CONTAINER | Out-Null
+                            docker rm -f $env:MAIN_CONTAINER | Out-Null
+                            Write-Host "🧹 Old container stopped and removed."
+                        } else {
+                            Write-Host "ℹ️ No old container found. Proceeding with deployment."
+                        }
+
+                        Write-Host "🚀 Starting new container from the freshly built image..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        docker-compose up -d
+
+                        Start-Sleep -Seconds 10
+
+                        $mainContainer = docker ps -q -f "name=$env:MAIN_CONTAINER"
+                        if (-not $mainContainer) {
+                            Write-Error "❌ Main application container ($env:MAIN_CONTAINER) not found after deployment."
+                            exit 1
+                        }
+
+                        Write-Host "✅ Application deployed successfully!"
+                        Write-Host "📦 Container ID: $mainContainer"
+                        docker logs $mainContainer
+                        docker ps
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                def buildResult = currentBuild.result ?: 'SUCCESS'
+                def statusIcon = buildResult == 'SUCCESS' ? '✅' : '❌'
+
+                emailext(
+                    subject: "${statusIcon} Aalai Frontend V.0.2 - Build ${env.BUILD_NUMBER} | ${buildResult}",
+                    body: """
+                        <html>
+                        <body>
+                            <h2>${statusIcon} Build Result</h2>
+                            <p><strong>Status:</strong> ${buildResult}</p>
+                            ${buildResult == 'SUCCESS' ? "<p><a href='${env.WEBSITE_URL}'>🌐 View Live Application</a></p>" : ""}
+                        </body>
+                        </html>
+                    """,
+                    to: "marikannan@hexrfactory.com, vishnu@hexrfactory.com, rithish@hexrfactory.com, jerald@hexrfactory.com, ramkumar@hexrfactory.com",
+                    attachLog: true,
+                    mimeType: 'text/html',
+                    replyTo: "marikannan@hexrfactory.com",
+                    from: '$SMTP_CREDENTIALS_USR'
+                )
+
+                cleanWs(deleteDirs: true)
+            }
+        }
+
+        success {
+            powershell '''
+                Write-Host "✅ Deployment successful!"
+            '''
+        }
+
+        failure {
+            powershell '''
+                Write-Host "❌ Deployment failed."
+            '''
+        }
+    }
+}

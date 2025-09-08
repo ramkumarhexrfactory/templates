@@ -1,0 +1,395 @@
+pipeline {
+    agent {
+        label 'remote-server-agent'
+    }
+
+    triggers {
+        GenericTrigger(
+            genericVariables: [
+                [key: 'ref', value: '$.ref'],
+                [key: 'commit', value: '$.after'],
+                [key: 'author', value: '$.commits[0].author.name']
+            ],
+            causeString: 'Triggered by commit on $ref by $author',
+            token: 'dwinzoBetaDwinzoDemo',
+            printContributedVariables: true,
+            printPostContent: true,
+            regexpFilterText: '$ref',
+            regexpFilterExpression: '^refs/heads/main-demo$'
+        )
+    }
+
+    environment {
+        GIT_CREDENTIALS = credentials('ramkumarp')
+        DOCKER_COMPOSE = 'docker-compose'
+        APP_NAME = 'Dwinzo-Beta/aalai_Demo_2'
+        MAIN_CONTAINER = 'aalaiDemoTwo'
+        WEBSITE_URL = 'http://185.100.212.76:8400'
+        SMTP_CREDENTIALS = credentials('smtp-credentials-gmail')
+    }
+
+    stages {
+        stage('Source') {
+            steps {
+                cleanWs(deleteDirs: true)
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: '*/main-demo']],
+                    userRemoteConfigs: [[
+                        url: 'http://185.100.212.76:7778/Dwinzo-Beta/Dwinzo_Demo.git',
+                        credentialsId: env.GIT_CREDENTIALS
+                    ]]
+                ])
+            }
+        }
+
+        stage('Build') {
+            steps {
+                script {
+                    powershell '''
+                        docker-compose build --no-cache
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "♻️ Stopping and removing old container if it exists..."
+                        $containerExists = docker ps -a -q -f "name=$env:MAIN_CONTAINER"
+                        if ($containerExists) {
+                            docker stop $env:MAIN_CONTAINER | Out-Null
+                            docker rm -f $env:MAIN_CONTAINER | Out-Null
+                            Write-Host "🧹 Old container stopped and removed."
+                        } else {
+                            Write-Host "ℹ️ No old container found. Proceeding with deployment."
+                        }
+
+                        Write-Host "🧹 Cleaning up unused Docker networks..."
+                        docker network prune -f | Out-Null
+
+                        Write-Host "🚀 Starting new container from the freshly built image..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        docker-compose up -d
+
+                        Start-Sleep -Seconds 10
+
+                        $mainContainer = docker ps -q -f "name=$env:MAIN_CONTAINER"
+                        if (-not $mainContainer) {
+                            Write-Error "❌ Main application container ($env:MAIN_CONTAINER) not found after deployment."
+                            exit 1
+                        }
+
+                        Write-Host "✅ Application deployed successfully!"
+                        Write-Host "📦 Container ID: $mainContainer"
+                        docker logs $mainContainer
+                        docker ps
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                def buildResult = currentBuild.result ?: 'SUCCESS'
+                def statusIcon = buildResult == 'SUCCESS' ? '✅' : '❌'
+                def date = new Date()
+                
+                emailext(
+                    subject: "${statusIcon} Aalai Frontend V.0.3 - Build ${env.BUILD_NUMBER} | ${buildResult}",
+                    body: """
+                        <!DOCTYPE html>
+                        <html lang="en">
+                        <head>
+                            <meta charset="UTF-8">
+                            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                            <title>Build Notification - Aalai Frontend V.0.3</title>
+                            <style>
+                                * { 
+                                    margin: 0; 
+                                    padding: 0; 
+                                    box-sizing: border-box; 
+                                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+                                }
+                                body { 
+                                    background: linear-gradient(135deg, #154ESE 0%, #71B280 50%, #E8F5E8 100%);
+                                    color: #2C3E50; 
+                                    line-height: 1.6; 
+                                    min-height: 100vh;
+                                    padding: 20px 0;
+                                }
+                                .container { 
+                                    max-width: 650px; 
+                                    margin: 20px auto; 
+                                    background: rgba(255, 255, 255, 0.95);
+                                    border-radius: 15px; 
+                                    overflow: hidden; 
+                                    box-shadow: 0 20px 40px rgba(21, 78, 94, 0.25);
+                                    backdrop-filter: blur(10px);
+                                }
+                                .header { 
+                                    background: linear-gradient(135deg, #154ESE 0%, #71B280 100%);
+                                    padding: 40px 30px; 
+                                    text-align: center; 
+                                    color: white; 
+                                    position: relative;
+                                }
+                                .header::before {
+                                    content: '';
+                                    position: absolute;
+                                    top: 0;
+                                    left: 0;
+                                    right: 0;
+                                    bottom: 0;
+                                    background: radial-gradient(circle at 50% 50%, rgba(255,255,255,0.1) 0%, transparent 70%);
+                                    opacity: 0.3;
+                                }
+                                .header h1 { 
+                                    font-size: 28px; 
+                                    font-weight: 300; 
+                                    margin-bottom: 8px;
+                                    letter-spacing: 1px;
+                                    position: relative;
+                                    z-index: 1;
+                                }
+                                .header p { 
+                                    opacity: 0.9; 
+                                    font-size: 14px; 
+                                    position: relative;
+                                    z-index: 1;
+                                }
+                                .content { 
+                                    padding: 40px 30px;
+                                    background: linear-gradient(to bottom, rgba(113, 178, 128, 0.08) 0%, rgba(21, 78, 94, 0.03) 100%);
+                                }
+                                .status-card { 
+                                    border-radius: 12px; 
+                                    padding: 30px; 
+                                    margin-bottom: 30px; 
+                                    text-align: center;
+                                    box-shadow: 0 8px 25px rgba(0,0,0,0.08);
+                                    backdrop-filter: blur(5px);
+                                }
+                                .status-success {
+                                    background: linear-gradient(135deg, rgba(113, 178, 128, 0.15) 0%, rgba(232, 245, 232, 0.8) 100%);
+                                    border: 2px solid #71B280;
+                                }
+                                .status-failure {
+                                    background: linear-gradient(135deg, rgba(231, 76, 60, 0.15) 0%, rgba(255, 235, 238, 0.8) 100%);
+                                    border: 2px solid #e74c3c;
+                                }
+                                .status-icon { 
+                                    font-size: 48px; 
+                                    margin-bottom: 15px; 
+                                    display: block;
+                                }
+                                .status-title { 
+                                    font-size: 24px; 
+                                    font-weight: 500; 
+                                    margin-bottom: 10px;
+                                    color: #154ESE;
+                                }
+                                .status-subtitle {
+                                    color: #666;
+                                    font-size: 15px;
+                                }
+                                .build-info { 
+                                    background: rgba(255, 255, 255, 0.9);
+                                    border-radius: 12px; 
+                                    padding: 25px; 
+                                    margin: 25px 0;
+                                    border-left: 5px solid #71B280;
+                                    box-shadow: 0 5px 15px rgba(113, 178, 128, 0.1);
+                                    backdrop-filter: blur(5px);
+                                }
+                                .info-row { 
+                                    display: flex; 
+                                    margin-bottom: 15px; 
+                                    padding-bottom: 12px; 
+                                    border-bottom: 1px solid rgba(113, 178, 128, 0.2);
+                                    align-items: center;
+                                }
+                                .info-row:last-child { 
+                                    margin-bottom: 0; 
+                                    padding-bottom: 0; 
+                                    border-bottom: none; 
+                                }
+                                .info-label { 
+                                    flex: 1; 
+                                    font-weight: 600; 
+                                    color: #154ESE;
+                                }
+                                .info-value { 
+                                    flex: 2; 
+                                    color: #2C3E50;
+                                    font-weight: 500;
+                                }
+                                .button-container { 
+                                    text-align: center; 
+                                    margin: 30px 0;
+                                }
+                                .live-button { 
+                                    display: inline-block; 
+                                    padding: 16px 32px; 
+                                    background: linear-gradient(135deg, #71B280 0%, #154ESE 100%);
+                                    color: white; 
+                                    text-decoration: none; 
+                                    border-radius: 25px; 
+                                    font-weight: 600; 
+                                    letter-spacing: 0.5px;
+                                    transition: all 0.3s ease;
+                                    box-shadow: 0 8px 20px rgba(113, 178, 128, 0.3);
+                                }
+                                .live-button:hover { 
+                                    transform: translateY(-2px); 
+                                    box-shadow: 0 12px 30px rgba(113, 178, 128, 0.4);
+                                }
+                                .log-note { 
+                                    background: rgba(113, 178, 128, 0.1);
+                                    border-left: 4px solid #71B280;
+                                    padding: 20px; 
+                                    margin: 25px 0; 
+                                    border-radius: 8px; 
+                                    font-size: 14px;
+                                    border-top-right-radius: 12px;
+                                    border-bottom-right-radius: 12px;
+                                }
+                                .team { 
+                                    margin-top: 25px; 
+                                    padding: 20px;
+                                    font-size: 13px; 
+                                    color: #666;
+                                    background: rgba(232, 245, 232, 0.5);
+                                    border-radius: 10px;
+                                    border: 1px solid rgba(113, 178, 128, 0.2);
+                                }
+                                .footer { 
+                                    padding: 30px; 
+                                    text-align: center; 
+                                    font-size: 13px; 
+                                    color: #71B280; 
+                                    background: linear-gradient(135deg, rgba(232, 245, 232, 0.4) 0%, rgba(113, 178, 128, 0.1) 100%);
+                                    border-top: 1px solid rgba(113, 178, 128, 0.2);
+                                }
+                                .success { color: #71B280; font-weight: 600; }
+                                .failure { color: #e74c3c; font-weight: 600; }
+                                .accent-line {
+                                    height: 3px;
+                                    background: linear-gradient(90deg, #71B280 0%, #154ESE 50%, #2C3E50 100%);
+                                    margin: 20px 0;
+                                    border-radius: 2px;
+                                }
+                                .badge {
+                                    display: inline-block;
+                                    padding: 8px 16px;
+                                    border-radius: 20px;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    text-transform: uppercase;
+                                    letter-spacing: 1px;
+                                    background: linear-gradient(135deg, #154ESE 0%, #71B280 100%);
+                                    color: white;
+                                    margin-left: 10px;
+                                }
+                                .version-tag {
+                                    background: rgba(113, 178, 128, 0.2);
+                                    color: #154ESE;
+                                    padding: 4px 12px;
+                                    border-radius: 20px;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    margin-left: 10px;
+                                }
+                            </style>
+                        </head>
+                        <body>
+                            <div class="container">
+                                <div class="header">
+                                    <h1>Aalai Frontend <span class="version-tag" style="background: rgba(255,255,255,0.2); color: white;">V.0.3</span></h1>
+                                    <p>Advanced Build Notification System</p>
+                                </div>
+                                
+                                <div class="content">
+                                    <div class="status-card ${buildResult == 'SUCCESS' ? 'status-success' : 'status-failure'}">
+                                        <div class="status-icon">${statusIcon}</div>
+                                        <div class="status-title">Build ${env.BUILD_NUMBER} - ${buildResult}</div>
+                                        <div class="accent-line"></div>
+                                        <p class="status-subtitle">${buildResult == 'SUCCESS' ? 'Your build completed successfully and is ready for deployment' : 'The build process encountered an error - please check the logs for details'}</p>
+                                    </div>
+                                    
+                                    <div class="build-info">
+                                        <div class="info-row">
+                                            <div class="info-label">📦 Project:</div>
+                                            <div class="info-value">Aalai Frontend V.0.3</div>
+                                        </div>
+                                        <div class="info-row">
+                                            <div class="info-label">🔢 Build Number:</div>
+                                            <div class="info-value">${env.BUILD_NUMBER} <span class="badge">${buildResult}</span></div>
+                                        </div>
+                                        <div class="info-row">
+                                            <div class="info-label">📊 Status:</div>
+                                            <div class="info-value ${buildResult == 'SUCCESS' ? 'success' : 'failure'}">${buildResult}</div>
+                                        </div>
+                                        <div class="info-row">
+                                            <div class="info-label">⏰ Timestamp:</div>
+                                            <div class="info-value">${date.toString()}</div>
+                                        </div>
+                                    </div>
+                                    
+                                    ${buildResult == 'SUCCESS' ? """
+                                    <div class="button-container">
+                                        <a href="${env.WEBSITE_URL}" class="live-button">
+                                            🌐 View Live Application
+                                        </a>
+                                    </div>
+                                    """ : ""}
+                                    
+                                    <div class="log-note">
+                                        <p><strong>📋 Build Logs:</strong> Comprehensive build logs are attached to this email for detailed analysis and debugging.</p>
+                                    </div>
+                                    
+                                    <div class="team">
+                                        <p><strong>📧 Notification Recipients:</strong></p>
+                                        <p>marikannan@hexrfactory.com, vishnu@hexrfactory.com, rithish@hexrfactory.com, jerald@hexrfactory.com, ramkumar@hexrfactory.com</p>
+                                        <div class="accent-line"></div>
+                                        <p><strong>🛠️ DevOps Team:</strong> For technical support or pipeline issues, please contact the DevOps/QA Team</p>
+                                    </div>
+                                </div>
+                                
+                                <div class="footer">
+                                    <p><strong>Jenkins CI/CD System</strong> • Aalai Frontend V.0.3</p>
+                                    <p style="margin-top: 10px; font-size: 12px; opacity: 0.8;">Pipeline configured and maintained by Development Team</p>
+                                    <div style="margin-top: 15px; padding-top: 10px; border-top: 1px solid rgba(113, 178, 128, 0.2);">
+                                        <p style="margin: 5px 0; font-size: 12px;">Primary Contact: <a href="mailto:marikannan@hexrfactory.com" style="color: #154ESE; text-decoration: none; font-weight: 600;">marikannan@hexrfactory.com</a></p>
+                                    </div>
+                                </div>
+                            </div>
+                        </body>
+                        </html>
+                    """,
+                    to: "marikannan@hexrfactory.com, vishnu@hexrfactory.com, rithish@hexrfactory.com, jerald@hexrfactory.com, ramkumar@hexrfactory.com",
+                    attachLog: true,
+                    mimeType: 'text/html',
+                    replyTo: "marikannan@hexrfactory.com",
+                    from: '$SMTP_CREDENTIALS_USR'
+                )
+            }
+        }
+    
+        success {
+            powershell '''
+                Write-Host "✅ Deployment successful!"
+            '''
+        }
+    
+        failure {
+            powershell '''
+                Write-Host "❌ Deployment failed."
+            '''
+        }
+    }
+}
