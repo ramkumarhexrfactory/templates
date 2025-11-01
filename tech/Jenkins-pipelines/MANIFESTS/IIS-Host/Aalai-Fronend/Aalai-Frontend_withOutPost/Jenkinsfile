@@ -1,0 +1,133 @@
+pipeline {
+    agent { label 'remote-server-agent' }
+
+    triggers {
+        GenericTrigger(
+            genericVariables: [
+                [key: 'ref', value: '$.ref'],
+                [key: 'commit', value: '$.after'],
+                [key: 'author', value: '$.commits[0].author.name']
+            ],
+            causeString: 'Triggered by push to ${ref} by ${author}',
+            token: 'aalaiStaticIIS',
+            printContributedVariables: true,
+            printPostContent: true,
+            regexpFilterText: '$ref',
+            regexpFilterExpression: '^refs/heads/main$'
+        )
+    }
+
+    environment {
+        GIT_CREDENTIALS = 'ramkumarp'
+        WEBSITE_URL = 'http://app.aalai.ai'
+        IIS_SITE_PATH = 'F:\\rithishsamm\\aalai-static\\frontend\\build'  // ✅ Actual IIS path
+        APP_BUILD_PATH = 'aalai-static-frontend/app'                      // ✅ Where package.json exists
+        GCM_INTERACTIVE = 'never'
+        GIT_ASKPASS = 'echo'
+    }
+
+    stages {
+        stage('Source') {
+            steps {
+                cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+                script {
+                    powershell '''
+                        git config --global http.postBuffer 524288000
+                        git config --global core.longpaths true
+                        git config --global core.autocrlf false
+                    '''
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: 'main']],
+                        userRemoteConfigs: [[
+                            url: 'http://185.100.212.76:7778/rithishsamm/aalai-static-frontend.git',
+                            credentialsId: env.GIT_CREDENTIALS
+                        ]],
+                        extensions: [
+                            [$class: 'CloneOption', shallow: true, depth: 1, noTags: true, timeout: 60]
+                        ]
+                    ])
+                }
+            }
+        }
+
+       stage('Build') {
+    steps {
+        script {
+            powershell '''
+                $appDir = Join-Path "$env:WORKSPACE" "aalai-static-frontend\\app"
+                Write-Host "🔧 Entering build directory: $appDir"
+
+                if (!(Test-Path $appDir)) {
+                    Write-Error "❌ App directory not found at $appDir"
+                    exit 1
+                }
+
+                Set-Location $appDir
+                Write-Host "📦 Installing dependencies..."
+                npm install
+
+                Write-Host "🚀 Running production build..."
+                npx cross-env CI=false GENERATE_SOURCEMAP=false react-scripts build
+            '''
+        }
+    }
+}
+
+
+        stage('Deploy to IIS') {
+            steps {
+                script {
+                    powershell '''
+                        $appDir = Join-Path "$env:WORKSPACE" "$env:APP_BUILD_PATH"
+                        $sourceDir = if (Test-Path "$appDir\\build") {
+                            "$appDir\\build"
+                        } elseif (Test-Path "$appDir\\dist") {
+                            "$appDir\\dist"
+                        } else {
+                            Write-Error "❌ No build or dist folder found in $appDir"
+                            exit 1
+                        }
+
+                        $destDir = "$env:IIS_SITE_PATH"
+                        Write-Host "🧹 Cleaning destination: $destDir"
+
+                        if (!(Test-Path $destDir)) {
+                            New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+                        } else {
+                            # Keep web.config safe
+                            $protected = @("web.config")
+                            Get-ChildItem -Path $destDir -File | ForEach-Object {
+                                if ($protected -notcontains $_.Name) { Remove-Item $_.FullName -Force }
+                            }
+                            Get-ChildItem -Path $destDir -Directory | Remove-Item -Recurse -Force
+                        }
+
+                        Write-Host "📤 Copying files from $sourceDir to $destDir..."
+                        Copy-Item -Path "$sourceDir\\*" -Destination $destDir -Recurse -Force
+
+                        Write-Host "✅ Deployment completed successfully!"
+                        Write-Host "🌐 Site: ${env:WEBSITE_URL}"
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            powershell '''
+                Write-Host "✅ Aalai Static Frontend successfully deployed!" -ForegroundColor Green
+                Write-Host "🌐 Website URL: $env:WEBSITE_URL" -ForegroundColor Cyan
+            '''
+        }
+        failure {
+            powershell '''
+                Write-Host "❌ Aalai Static Frontend deployment failed!" -ForegroundColor Red
+            '''
+        }
+        cleanup {
+            cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+        }
+    }
+}

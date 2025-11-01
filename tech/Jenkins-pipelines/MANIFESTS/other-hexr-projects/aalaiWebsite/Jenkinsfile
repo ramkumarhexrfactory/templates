@@ -36,13 +36,16 @@ pipeline {
                     powershell '''
                         Write-Host "Starting source stage..."
                     '''
-                    checkout([
+                    checkout([             
                         $class: 'GitSCM',
                         branches: [[name: '*/main']],
                         userRemoteConfigs: [[
                             url: 'http://185.100.212.76:7778/Vishnu/aalai-website.git',
                             credentialsId: env.GIT_CREDENTIALS
-                        ]]
+                        ]],
+                        extensions: [
+                            [$class: 'CloneOption', depth: 1, shallow: true, noTags: true, timeout: 10]
+                        ]
                     ])
                     powershell '''
                         Write-Host "Source checkout completed successfully"

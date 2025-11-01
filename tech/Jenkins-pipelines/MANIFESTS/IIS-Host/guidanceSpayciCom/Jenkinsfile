@@ -1,0 +1,339 @@
+pipeline {
+    agent { label 'remote-server-agent' }
+
+    triggers {
+        GenericTrigger(
+            genericVariables: [
+                [key: 'ref', value: '$.ref'],
+                [key: 'commit', value: '$.after'],
+                [key: 'author', value: '$.commits[0].author.name']
+            ],
+            causeString: 'Triggered by push to ${ref} by ${author}',
+            token: 'rcclvallamproject001',
+            printContributedVariables: true,
+            printPostContent: true,
+            regexpFilterText: '$ref',
+            regexpFilterExpression: '^refs/heads/main$'
+        )
+    }
+
+    environment {
+        GIT_CREDENTIALS = 'ramkumarp' // Jenkins credential ID
+        WEBSITE_URL = 'http://guidance.spayci.com'
+        IIS_SITE_PATH = 'F:\\rithishsamm\\rccl_vallam_project\\dist'
+        APP_BUILD_PATH = 'app'
+        GCM_INTERACTIVE = 'never'
+        GIT_ASKPASS = 'echo'
+    }
+
+    stages {
+        stage('Source') {
+            steps {
+                cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+                script {
+                    powershell '''
+                        git config --global http.postBuffer 524288000
+                        git config --global core.packedGitLimit 512m
+                        git config --global core.bigFileThreshold 512m
+                        git config --global core.longpaths true
+                    '''
+                    // ✅ Use Git plugin with credentialsId instead of embedding user/pass in URL
+                    checkout([$class: 'GitSCM',
+                        branches: [[name: 'main']],
+                        userRemoteConfigs: [[
+                            url: 'http://185.100.212.76:7778/Vishnu/rccl_vallam_project.git',
+                            credentialsId: env.GIT_CREDENTIALS
+                        ]],
+                        extensions: [
+                            [$class: 'CloneOption', shallow: true, depth: 1, noTags: true, timeout: 60]
+                        ]
+                    ])
+                }
+            }
+        }
+
+        stage('Build') {
+            steps {
+                script {
+                    powershell '''
+                        $appDir = Join-Path "$env:WORKSPACE" "$env:APP_BUILD_PATH"
+                        Write-Host "🔧 Entering build directory: $appDir"
+                        if (!(Test-Path $appDir)) { Write-Error "App directory not found"; exit 1 }
+
+                        Set-Location $appDir
+                        Write-Host "📦 Installing dependencies..."
+                        npm install
+                        if ($LASTEXITCODE -ne 0) { Write-Error "npm install failed"; exit 1 }
+
+                        Write-Host "🚀 Building project..."
+                        npm run build
+                        if ($LASTEXITCODE -ne 0) { Write-Error "Build failed"; exit 1 }
+
+                        if (Test-Path "$appDir\\dist") {
+                            Write-Host "✅ Build complete: $appDir\\dist"
+                        } elseif (Test-Path "$appDir\\build") {
+                            Write-Host "✅ Build complete: $appDir\\build"
+                        } else {
+                            Write-Error "❌ No dist/build folder found after build."
+                            exit 1
+                        }
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to IIS') {
+            steps {
+                script {
+                    powershell '''
+                        $distFolder = if (Test-Path "$env:WORKSPACE\\$env:APP_BUILD_PATH\\dist") {
+                            "$env:WORKSPACE\\$env:APP_BUILD_PATH\\dist"
+                        } elseif (Test-Path "$env:WORKSPACE\\$env:APP_BUILD_PATH\\build") {
+                            "$env:WORKSPACE\\$env:APP_BUILD_PATH\\build"
+                        } else { Write-Error "No dist/build folder found"; exit 1 }
+
+                        $destDir = "$env:IIS_SITE_PATH"
+                        if (!(Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir | Out-Null }
+
+                        Write-Host "🧹 Cleaning old files (except web.config)..."
+                        $protected = @("web.config")
+                        Get-ChildItem -Path $destDir -File | ForEach-Object {
+                            if ($protected -notcontains $_.Name) { Remove-Item $_.FullName -Force }
+                        }
+                        Get-ChildItem -Path $destDir -Directory | Remove-Item -Recurse -Force
+
+                        Write-Host "📤 Copying new files from $distFolder to $destDir..."
+                        Copy-Item -Path "$distFolder\\*" -Destination $destDir -Recurse -Force
+
+                        Write-Host "✅ Deployment finished successfully!"
+                        Write-Host "🌐 Site: ${env:WEBSITE_URL}"
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                def buildResult = currentBuild.result ?: 'SUCCESS'
+                def duration = currentBuild.durationString.replace(' and counting', '')
+                def statusIcon = buildResult == 'SUCCESS' ? '✅' : '❌'
+                def statusColor = buildResult == 'SUCCESS' ? '#28a745' : '#dc3545'
+                def date = new Date().format("EEE, dd MMM yyyy HH:mm:ss z", TimeZone.getTimeZone("IST"))
+                
+                // Get commit information if available
+                def commitInfo = ''
+                try {
+                    def changeLogSets = currentBuild.changeSets
+                    if (!changeLogSets.isEmpty()) {
+                        def entries = changeLogSets[0].items
+                        if (!entries.isEmpty()) {
+                            def latestCommit = entries[0]
+                            commitInfo = """
+                                <p><b>Latest Commit:</b> ${latestCommit.msg.take(100)}</p>
+                                <p><b>Committer:</b> ${latestCommit.author.displayName}</p>
+                            """
+                        }
+                    }
+                } catch (Exception e) {
+                    commitInfo = '<p><b>Commit Info:</b> Not available</p>'
+                }
+
+                emailext(
+                    subject: "${statusIcon} RCCL Vallam Project - IIS Deployment | Build #${env.BUILD_NUMBER} - ${buildResult}",
+                    body: """
+                        <!DOCTYPE html>
+                        <html>
+                        <head>
+                        <meta charset="UTF-8">
+                        <style>
+                            body {
+                                font-family: 'Segoe UI', Arial, sans-serif;
+                                background: linear-gradient(135deg, #4b0082 0%, #9370db 100%);
+                                color: #fff;
+                                margin: 0; 
+                                padding: 20px;
+                            }
+                            .container {
+                                max-width: 700px;
+                                background: #ffffff;
+                                color: #333333;
+                                margin: 20px auto;
+                                padding: 0;
+                                border-radius: 15px;
+                                box-shadow: 0 8px 35px rgba(0,0,0,0.2);
+                                overflow: hidden;
+                            }
+                            .header {
+                                text-align: center;
+                                background: linear-gradient(135deg, #4b0082, #6a5acd);
+                                color: white;
+                                padding: 30px 25px;
+                            }
+                            .status-banner {
+                                background: ${statusColor};
+                                color: white;
+                                text-align: center;
+                                padding: 15px;
+                                font-size: 18px;
+                                font-weight: bold;
+                            }
+                            .content {
+                                padding: 30px;
+                            }
+                            .info-section {
+                                background: #f8f9fa;
+                                padding: 20px;
+                                border-radius: 10px;
+                                margin: 20px 0;
+                                border-left: 4px solid ${statusColor};
+                            }
+                            .button-container {
+                                text-align: center;
+                                margin: 25px 0;
+                            }
+                            .button {
+                                display: inline-block;
+                                padding: 12px 30px;
+                                border-radius: 25px;
+                                text-decoration: none;
+                                background: linear-gradient(135deg, #6a5acd, #4b0082);
+                                color: white;
+                                font-weight: bold;
+                                margin: 5px 10px;
+                                transition: transform 0.2s;
+                            }
+                            .button:hover {
+                                transform: translateY(-2px);
+                                box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+                            }
+                            .footer {
+                                background: #f1f3f4;
+                                padding: 20px;
+                                text-align: center;
+                                color: #666;
+                                font-size: 12px;
+                                border-top: 1px solid #e0e0e0;
+                            }
+                            .metrics {
+                                display: flex;
+                                justify-content: space-around;
+                                text-align: center;
+                                margin: 20px 0;
+                            }
+                            .metric-item {
+                                flex: 1;
+                                padding: 15px;
+                            }
+                            .metric-value {
+                                font-size: 24px;
+                                font-weight: bold;
+                                color: ${statusColor};
+                            }
+                        </style>
+                        </head>
+                        <body>
+                            <div class="container">
+                                <div class="header">
+                                    <h1 style="margin: 0; font-size: 28px;">🏗 RCCL Vallam Project</h1>
+                                    <p style="margin: 5px 0 0 0; opacity: 0.9;">IIS Deployment Notification</p>
+                                </div>
+                                
+                                <div class="status-banner">
+                                    ${statusIcon} Build #${env.BUILD_NUMBER} - ${buildResult}
+                                </div>
+                                
+                                <div class="content">
+                                    <div class="metrics">
+                                        <div class="metric-item">
+                                            <div class="metric-value">#${env.BUILD_NUMBER}</div>
+                                            <div>Build Number</div>
+                                        </div>
+                                        <div class="metric-item">
+                                            <div class="metric-value">${duration}</div>
+                                            <div>Duration</div>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="info-section">
+                                        <h3 style="margin-top: 0; color: #4b0082;">📋 Deployment Details</h3>
+                                        <p><b>🌐 Deployed Site:</b> <a href="${env.WEBSITE_URL}" style="color: #4b0082; text-decoration: none;" target="_blank">${env.WEBSITE_URL}</a></p>
+                                        <p><b>🖥️ Environment:</b> Remote IIS Server</p>
+                                        <p><b>📅 Date & Time:</b> ${date}</p>
+                                        ${commitInfo}
+                                    </div>
+                                    
+                                    <div class="button-container">
+                                        <a href="${env.BUILD_URL}" class="button">📊 View Build Logs</a>
+                                        <a href="${env.WEBSITE_URL}" class="button" style="background: linear-gradient(135deg, #28a745, #20c997);">🌐 Visit Website</a>
+                                    </div>
+                                </div>
+                                
+                                <div class="footer">
+                                    <p style="margin: 0;">🤖 Automated Deployment • Jenkins CI/CD Pipeline</p>
+                                    <p style="margin: 5px 0 0 0;">👨‍💻 Maintained by Rithish Sam & Ramkumar P</p>
+                                </div>
+                            </div>
+                        </body>
+                        </html>
+                    """,
+                    to: "marikannan@hexrfactory.com, vishnu@hexrfactory.com, rithish@hexrfactory.com, nalvazhuthi@hexrfactory.com, ramkumar@hexrfactory.com",
+                    attachLog: true,
+                    compressLog: true,
+                    mimeType: 'text/html'
+                )
+            }
+        }
+
+        success {
+            script {
+                echo "🎉 Deployment completed successfully!"
+                echo "📊 Build Duration: ${currentBuild.durationString}"
+                echo "🌐 Website URL: ${env.WEBSITE_URL}"
+                
+                powershell '''
+                    Write-Host "✅ IIS Deployment successful!" -ForegroundColor Green
+                    Write-Host "🌐 Website is live at: $env:WEBSITE_URL" -ForegroundColor Cyan
+                '''
+            }
+        }
+
+        failure {
+            script {
+                echo "❌ Deployment failed!"
+                echo "⏱️ Build Duration: ${currentBuild.durationString}"
+                
+                powershell '''
+                    Write-Host "❌ IIS Deployment failed!" -ForegroundColor Red
+                    Write-Host "Please check the build logs for detailed error information." -ForegroundColor Yellow
+                '''
+                
+                // Archive important artifacts for debugging
+                archiveArtifacts artifacts: '**/*.log,**/web.config,**/deployment*.json', allowEmptyArchive: true
+            }
+        }
+
+        unstable {
+            script {
+                echo "⚠️ Build marked as unstable"
+                powershell 'Write-Host "⚠️ Build is unstable - check test results or quality gates" -ForegroundColor Yellow'
+            }
+        }
+
+        changed {
+            script {
+                if (currentBuild.previousBuild?.result != currentBuild.result) {
+                    echo "📈 Build status changed: ${currentBuild.previousBuild?.result} -> ${currentBuild.result}"
+                }
+            }
+        }
+
+        cleanup {
+            script {
+                echo "🧹 Performing post-build cleanup..."
+                cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+            }
+        }
+    }
+}

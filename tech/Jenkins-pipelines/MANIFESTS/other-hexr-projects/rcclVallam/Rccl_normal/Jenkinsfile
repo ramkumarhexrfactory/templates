@@ -2,7 +2,6 @@ pipeline {
     agent {
         label 'remote-server-agent'
     }
-
     triggers {
         GenericTrigger(
             genericVariables: [
@@ -11,71 +10,78 @@ pipeline {
                 [key: 'author', value: '$.commits[0].author.name']
             ],
             causeString: 'Triggered by commit on $ref by $author',
-            token: 'rcclvallamproject',
+            token: 'rcclvallamproject001',
             printContributedVariables: true,
             printPostContent: true,
             regexpFilterText: '$ref',
             regexpFilterExpression: '^refs/heads/main$'
         )
     }
-
     environment {
         GIT_CREDENTIALS = credentials('ramkumarp')
         DOCKER_COMPOSE = 'docker-compose'
-        APP_NAME = 'Vishnu/rccl_vallam_project'
-        MAIN_CONTAINER = 'rccl_vallam'
+        APP_NAME = 'vishnu/rccl_vallam_project'
+        MAIN_CONTAINER = 'rccl_vallam' 
         SONAR_HOST_URL = 'http://185.100.212.76:12345'
-        SONAR_TOKEN = credentials('sonarqube-token')
+        SONAR_TOKEN = credentials('sonarqube-token')  
         SMTP_CREDENTIALS = credentials('smtp-credentials-gmail')
-        WEBSITE_URL = 'http://185.100.212.76:4080' // Update with your actual URL
+        WEBSITE_URL = 'http://185.100.212.76:4080'
     }
 
     stages {
         stage('Source') {
-            steps {
-                cleanWs(deleteDirs: true, disableDeferredWipeout: true)
-                script {
-                    powershell '''
-                        Write-Host "Starting source checkout..."
-                        git config --global core.autocrlf false
-                        git config --global http.sslVerify false
-                    '''
-                    
-                    checkout([
-                        $class: 'GitSCM',
-                        branches: [[name: '*/main']],
-                        userRemoteConfigs: [[
-                            url: 'http://185.100.212.76:7778/Vishnu/rccl_vallam_project.git',
-                            credentialsId: env.GIT_CREDENTIALS
-                        ]]
-                    ])
-                    
-                    powershell '''
-                        Write-Host "Source checkout completed successfully"
-                        dir
-                    '''
+                steps {
+                    cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+                    script {
+                        powershell '''
+                            Write-Host "📥 Fetching latest source code..."
+                        '''
+                        checkout([
+                            $class: 'GitSCM',
+                            branches: [[name: '*/main']],
+                            userRemoteConfigs: [[
+                                url: 'http://185.100.212.76:7778/Vishnu/rccl_vallam_project.git',
+                                credentialsId: env.GIT_CREDENTIALS
+                            ]],
+                            extensions: [
+                                [$class: 'WipeWorkspace'],
+                                [$class: 'CloneOption', depth: 1, shallow: false, noTags: true, timeout: 10]
+                            ]
+                        ])
+            
+                        // ✅ Use PowerShell instead of sh (Windows-safe)
+                        powershell '''
+                            Write-Host "🔄 Ensuring we are on latest commit..."
+                            git fetch --all
+                            git reset --hard origin/main
+                            $commitHash = git rev-parse HEAD
+                            Write-Host "✅ Building commit: $commitHash"
+                        '''
+                    }
                 }
             }
-        }
-
-
+   
 
 
         stage('Build') {
             steps {
                 script {
                     powershell '''
-                        Write-Host "Starting Docker Compose build..."
-                        $env:COMPOSE_CONVERT_WINDOWS_PATHS = 1
+                        Write-Host "🛠️ Building Docker image without affecting existing container..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
                         docker-compose build --no-cache
-                        Write-Host "Build completed successfully."
-                        docker images | findstr rccl_vallam  # Confirm image built
+                        if ($LASTEXITCODE -ne 0) {
+                            Write-Error "❌ Docker build failed!"
+                            exit 1
+                        }
+                        Write-Host "✅ Build completed. Existing container still running."
                     '''
                 }
             }
         }
 
-        stage('SonarQube Analysis') {
+
+stage('SonarQube Analysis') {
             steps {
                 script {
                     powershell '''
@@ -109,38 +115,37 @@ sonar.exclusions=**/node_modules/**,**/dist/**,**/build/**,**/public/**,**/*.min
                 }
             }
         }
-
+        
         stage('Deploy') {
             steps {
                 script {
                     powershell '''
-                        Write-Host "Starting zero-downtime style deployment..."
+                        Write-Host "♻️ Stopping and removing old container if it exists..."
+                        $containerExists = docker ps -a -q -f "name=$env:MAIN_CONTAINER"
+                        if ($containerExists) {
+                            docker stop $env:MAIN_CONTAINER | Out-Null
+                            docker rm -f $env:MAIN_CONTAINER | Out-Null
+                            Write-Host "🧹 Old container stopped and removed."
+                        } else {
+                            Write-Host "ℹ️ No old container found. Proceeding with deployment."
+                        }
 
-                        $env:COMPOSE_CONVERT_WINDOWS_PATHS = 1
+                        Write-Host "🚀 Starting new container from the freshly built image..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        docker-compose up -d rccl_vallam-website   # 👈 explicitly start this service
 
-                        # Step 1: Stop and remove old containers gracefully
-                        Write-Host "Stopping and removing old containers..."
-                        docker compose down --remove-orphans
+                        Start-Sleep -Seconds 10
 
-                        # Step 2: Start new containers
-                        Write-Host "Starting new containers..."
-                        docker compose up -d --force-recreate
-
-                        Start-Sleep -Seconds 15
-
-                        # Step 3: Verify main container is running
-                        $mainContainer = docker ps -q -f name="$env:MAIN_CONTAINER"
+                        $mainContainer = docker ps -q -f "name=$env:MAIN_CONTAINER"
                         if (-not $mainContainer) {
-                            Write-Error "❌ Deployment failed: Main container '$env:MAIN_CONTAINER' did not start!"
+                            Write-Error "❌ Main application container ($env:MAIN_CONTAINER) not found after deployment."
+                            docker ps -a
                             exit 1
                         }
 
                         Write-Host "✅ Application deployed successfully!"
-                        Write-Host "Main Container ID: $mainContainer"
-                        Write-Host "Container Logs:"
-                        docker logs $mainContainer
-
-                        Write-Host "Current Running Containers:"
+                        Write-Host "📦 Container ID: $mainContainer"
+                        docker logs $mainContainer --tail=50
                         docker ps
                     '''
                 }
@@ -267,10 +272,10 @@ sonar.exclusions=**/node_modules/**,**/dist/**,**/build/**,**/public/**,**/*.min
                         <tr>
                             <td style="padding:15px 20px; border-bottom:1px solid rgba(89,98,53,0.1); color:#2c3e50; background:white;"><strong>Build Status</strong></td>
                             <td style="padding:15px 20px; border-bottom:1px solid rgba(89,98,53,0.1); color:#2c3e50; background:white;">
-                                <span class="status-badge" style="display:inline-block; padding:12px 25px; border-radius:30px; font-weight:700; font-size:15px; text-transform:uppercase; letter-spacing:1px; 
-                                    ${buildResult == 'SUCCESS' ? 'background:rgba(255,255,255,0.2); color:white; border:2px solid rgba(255,255,255,0.3);' : 
-                                      buildResult == 'FAILURE' ? 'background:rgba(220,53,69,0.9); color:white; border:2px solid rgba(220,53,69,0.3);' : 
-                                      'background:rgba(255,193,7,0.9); color:#2c3e50; border:2px solid rgba(255,193,7,0.3);'}">
+                                <span class="status-badge" style="display:inline-block; padding:12px 25px; border-radius:30px; font-weight:700; font-size:15px; text-transform:uppercase; letter-spacing:1px;
+                                    ${buildResult == 'SUCCESS' ? 'background:rgba(40,167,69,0.9); color:white; border:2px solid rgba(40,167,69,0.3);' :
+                                    buildResult == 'FAILURE' ? 'background:rgba(220,53,69,0.9); color:white; border:2px solid rgba(220,53,69,0.3);' :
+                                    'background:rgba(255,193,7,0.9); color:#2c3e50; border:2px solid rgba(255,193,7,0.3);'}">
                                     ${buildResult}
                                 </span>
                             </td>
@@ -357,7 +362,7 @@ sonar.exclusions=**/node_modules/**,**/dist/**,**/build/**,**/public/**,**/*.min
 </body>
 </html>
 """,
-                    to: "marikannan@hexrfactory.com, vishnu@hexrfactory.com, rithish@hexrfactory.com, nalvazhuthi@hexrfactory.com, ramkumar@hexrfactory.com",
+                    to: "ramkumar@hexrfactory.com",
                     attachLog: true,
                     mimeType: 'text/html',
                     replyTo: "marikannan@hexrfactory.com",
@@ -388,4 +393,5 @@ sonar.exclusions=**/node_modules/**,**/dist/**,**/build/**,**/public/**,**/*.min
             '''
         }
     }
+
 }

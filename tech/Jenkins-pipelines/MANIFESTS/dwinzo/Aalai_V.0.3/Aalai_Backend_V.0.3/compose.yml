@@ -1,0 +1,93 @@
+services:
+  api-server:
+    build:
+      context: ./  
+      dockerfile: src/api-server/Dockerfile 
+    container_name: aalai_demo_api_end
+    environment:
+      NODE_ENV: development
+    ports:
+      - "9901:9901"
+    expose:
+      - 9901
+    depends_on:
+      - mongo
+    networks:
+      - DwinzoMajor
+
+  socket-server:
+    build:
+      context: ./  
+      dockerfile: src/socket-server/Dockerfile 
+    container_name: aalai_demo_socket_end
+    environment:
+      NODE_ENV: development
+    ports:
+      - "9902:9902"
+    expose:
+      - 9902
+    depends_on:
+      - mongo
+    networks:
+      - DwinzoMajor
+
+  mongo:
+    image: mongo:latest
+    container_name: aalai_demo_mongo
+    ports:
+      - "9903:27017"
+    volumes:
+      - mongo-data:/data/db
+    networks:
+      - DwinzoMajor
+
+# MongoDB Exporter (for Prometheus)
+  mongo-exporter:
+    image: bitnami/mongodb-exporter:latest
+    container_name: aalai_demo_mongo_exporter
+    environment:
+      - MONGODB_URI=mongodb://mongo:27017
+    ports:
+      - "9216:9216"
+    depends_on:
+      - mongo
+    networks:
+      - DwinzoMajor
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: aalai_demo_prometheus
+    ports:
+      - "6789:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus   # <--- persist TSDB data
+    networks:
+      - DwinzoMajor
+
+  # Grafana
+  grafana:
+    image: grafana/grafana:latest
+    container_name: aalai_demo_grafana
+    ports:
+      - "5678:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - DwinzoMajor
+
+volumes:
+  mongo-data:
+  grafana-data:
+  prometheus-data:
+
+networks:
+  DwinzoMajor:
+    driver: bridge
+
+
+https://ramkumarperiyasamy.github.io/sonar-logo/HEXR%20Sonar%20Logo%20Design.png
+https://ramkumarhexrfactory.github.io/sonar-logo/HEXR%20Sonar%20Logo%20Design.png

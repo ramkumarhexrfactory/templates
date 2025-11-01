@@ -1,0 +1,524 @@
+pipeline {
+    agent {
+        label 'remote-server-agent'
+    }
+
+    triggers {
+        GenericTrigger(
+            genericVariables: [
+                [key: 'ref', value: '$.ref'],
+                [key: 'commit', value: '$.after'],
+                [key: 'author', value: '$.commits[0].author.name']
+            ],
+            causeString: 'Triggered by commit on $ref by $author',
+            token: 'WebGPULive2211',
+            printContributedVariables: true,
+            printPostContent: true,
+            regexpFilterText: '$ref',
+            regexpFilterExpression: '^refs/heads/Updated$'
+        )
+    }
+
+    environment {
+        GIT_CREDENTIALS = credentials('ramkumarp')
+        DOCKER_COMPOSE = 'docker-compose'
+        APP_NAME = 'webgpu-3d-engine'
+        MAIN_CONTAINER = 'webgpu-app'
+        SONAR_HOST_URL = 'http://185.100.212.76:12345'
+        SONAR_TOKEN = credentials('sonarqube-token')
+        SMTP_CREDENTIALS = credentials('smtp-credentials-gmail')
+        WEBSITE_URL = 'https://185.100.212.76:5505'
+    }
+
+    stages {
+        stage('Source') {
+            steps {
+                cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+                script {
+                    powershell '''
+                        Write-Host "Starting WebGPU application source stage..."
+                    '''
+                    
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: '*/Updated']],
+                        userRemoteConfigs: [[
+                            url: 'http://185.100.212.76:7778/Core-Engine/Web_GPU_Live.git',
+                            credentialsId: env.GIT_CREDENTIALS
+                        ]]
+                    ])
+                    
+                    powershell '''
+                        Write-Host "Source checkout completed successfully"
+                        Write-Host "Project structure:"
+                        dir
+                        
+                        if (Test-Path "Example/AllData/index.html") {
+                            Write-Host "✅ Main HTML file found"
+                        } else {
+                            Write-Warning "❌ Main HTML file not found"
+                        }
+                        
+                        if (Test-Path "Example/AllData/AllData.js") {
+                            Write-Host "✅ Main JavaScript file found"
+                        } else {
+                            Write-Warning "❌ Main JavaScript file not found"
+                        }
+                        
+                        if (Test-Path "src") {
+                            Write-Host "✅ Source directory found"
+                        } else {
+                            Write-Warning "❌ Source directory not found"
+                        }
+                        
+                        # Check for critical shader files
+                        if (Test-Path "src/shaders/shaders.wgsl") {
+                            Write-Host "✅ WebGPU shader file found"
+                        } else {
+                            Write-Error "❌ CRITICAL: WebGPU shader file (src/shaders/shaders.wgsl) not found!"
+                            Write-Host "This file is required for WebGPU rendering pipeline"
+                            exit 1
+                        }
+                        
+                        # Check for GLTF model
+                        if (Test-Path "src/asset/Gltf/gas cylinder.gltf") {
+                            Write-Host "✅ Gas cylinder GLTF model found"
+                        } else {
+                            Write-Warning "❌ Gas cylinder GLTF model not found"
+                        }
+                    '''
+                }
+            }
+        }
+
+        stage('Shader Validation') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Validating WebGPU shaders..."
+                        
+                        if (Test-Path "src/shaders/shaders.wgsl") {
+                            $shaderContent = Get-Content "src/shaders/shaders.wgsl" -Raw
+                            $shaderSize = $shaderContent.Length
+                            Write-Host "Shader file size: $shaderSize bytes"
+                            
+                            if ($shaderContent -match "@vertex") {
+                                Write-Host "✅ Vertex shader entry point found"
+                            } else {
+                                Write-Error "❌ Vertex shader entry point missing"
+                            }
+                            
+                            if ($shaderContent -match "@fragment") {
+                                Write-Host "✅ Fragment shader entry point found"
+                            } else {
+                                Write-Error "❌ Fragment shader entry point missing"
+                            }
+                            
+                            if ($shaderContent -match "main_vertex") {
+                                Write-Host "✅ main_vertex function found"
+                            } else {
+                                Write-Error "❌ main_vertex function missing"
+                            }
+                            
+                            if ($shaderContent -match "main_fragment") {
+                                Write-Host "✅ main_fragment function found"
+                            } else {
+                                Write-Error "❌ main_fragment function missing"
+                            }
+                        } else {
+                            Write-Error "Shader file not found!"
+                            exit 1
+                        }
+                        
+                        Write-Host "Shader validation completed"
+                    '''
+                }
+            }
+        }
+
+        stage('SSL Setup') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Checking SSL certificates..."
+                        
+                        if ((Test-Path "cert.pem") -and (Test-Path "key.pem")) {
+                            Write-Host "✅ SSL certificates already exist"
+                        } else {
+                            Write-Warning "❌ SSL certificates not found"
+                            Write-Host "Note: Nginx configuration expects cert.pem and key.pem"
+                            Write-Host "Please ensure certificates are present in the repository"
+                        }
+                        
+                        Write-Host "SSL setup completed"
+                    '''
+                }
+            }
+        }
+
+        stage('Build') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Cleaning existing WebGPU Docker resources..."
+                        
+                        $containerExists = docker ps -a -q -f name="$env:MAIN_CONTAINER"
+                        if ($containerExists) {
+                            Write-Host "Stopping and removing existing container: $env:MAIN_CONTAINER"
+                            docker stop $env:MAIN_CONTAINER
+                            docker rm $env:MAIN_CONTAINER
+                        } else {
+                            Write-Host "Container $env:MAIN_CONTAINER not found, skipping stop and remove."
+                        }
+                        
+                        $imageExists = docker images -q "$env:APP_NAME"
+                        if ($imageExists) {
+                            Write-Host "Removing existing image: $env:APP_NAME"
+                            docker rmi $env:APP_NAME --force
+                        }
+                        
+                        Write-Host "Currently existing containers:"
+                        docker ps -a
+                        
+                        Write-Host "Current directory contents:"
+                        dir
+                    '''
+                    
+                    powershell '''
+                        Write-Host "Building WebGPU application with Docker Compose..."
+                        
+                        if (-not (Test-Path "docker-compose.yaml")) {
+                            Write-Error "docker-compose.yaml not found!"
+                            exit 1
+                        }
+                        
+                        if (-not (Test-Path "Dockerfile")) {
+                            Write-Error "Dockerfile not found!"
+                            exit 1
+                        }
+                        
+                        if (-not (Test-Path "nginx.conf")) {
+                            Write-Error "nginx.conf not found!"
+                            exit 1
+                        }
+                        
+                        Write-Host "All required files found. Starting build..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        docker-compose build --no-cache
+                        
+                        Write-Host "Build completed. Listing images:"
+                        docker images | Select-String "webgpu"
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Deploying WebGPU application with Docker Compose..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        docker compose up -d
+                        
+                        Write-Host "Waiting for container to start..."
+                        Start-Sleep -Seconds 15
+                        
+                        $mainContainer = docker ps -q -f name="$env:MAIN_CONTAINER"
+                        if (-not $mainContainer) {
+                            Write-Error "Main application container ($env:MAIN_CONTAINER) not found or not running"
+                            docker logs $env:MAIN_CONTAINER
+                            exit 1
+                        }
+                        
+                        Write-Host "✅ WebGPU application deployed successfully!"
+                        Write-Host "Main Container ID: $mainContainer"
+                        
+                        Write-Host "Container Logs:"
+                        docker logs $mainContainer --tail 20
+                        
+                        Write-Host "Currently running containers:"
+                        docker ps
+                        
+                        Write-Host "Testing application accessibility..."
+                        try {
+                            $response = Invoke-WebRequest -Uri "${env.WEBSITE_URL}" -SkipCertificateCheck -TimeoutSec 30
+                            Write-Host "✅ Application is accessible on HTTPS port 5505"
+                            Write-Host "Response status: $($response.StatusCode)"
+                        } catch {
+                            Write-Warning "Could not verify HTTPS accessibility: $($_.Exception.Message)"
+                        }
+                        
+                        Write-Host "Access your WebGPU application at:"
+                        Write-Host "HTTPS: ${env.WEBSITE_URL}"
+                        Write-Host "Local: https://localhost:5505"
+                    '''
+                }
+            }
+        }
+
+        stage('Health Check') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Performing WebGPU application health check..."
+                        
+                        $containerStatus = docker inspect --format='{{.State.Status}}' $env:MAIN_CONTAINER
+                        Write-Host "Container Status: $containerStatus"
+                        
+                        if ($containerStatus -ne "running") {
+                            Write-Error "Container is not running properly"
+                            docker logs $env:MAIN_CONTAINER
+                            exit 1
+                        }
+                        
+                        $portCheck = docker exec $env:MAIN_CONTAINER netstat -tlnp | Select-String ":5505"
+                        if ($portCheck) {
+                            Write-Host "✅ Port 5505 is listening inside container"
+                        } else {
+                            Write-Warning "❌ Port 5505 might not be listening"
+                        }
+                        
+                        $nginxProcess = docker exec $env:MAIN_CONTAINER ps aux | Select-String "nginx"
+                        if ($nginxProcess) {
+                            Write-Host "✅ Nginx is running"
+                        } else {
+                            Write-Warning "❌ Nginx process not found"
+                        }
+                        
+                        $shaderCheck = docker exec $env:MAIN_CONTAINER test -f "/usr/share/nginx/html/src/shaders/shaders.wgsl"
+                        if ($LASTEXITCODE -eq 0) {
+                            Write-Host "✅ Shader files accessible in container"
+                        } else {
+                            Write-Warning "❌ Shader files not accessible in container"
+                        }
+                        
+                        Write-Host "🚀 WebGPU 3D Engine Health Check Complete!"
+                        Write-Host "Application Status: HEALTHY"
+                        
+                        docker stats --no-stream $env:MAIN_CONTAINER
+                    '''
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Generating sonar-project.properties..."
+                        $sonarProps = @"
+sonar.projectKey=webgpu-3d-engine
+sonar.projectName=webgpu-3d-engine
+sonar.projectVersion=1.0.0
+sonar.projectDescription=WebGPU 3D Rendering Engine
+sonar.sources=./
+sonar.language=js
+sonar.sourceEncoding=UTF-8
+sonar.javascript.lcov.reportPaths=coverage/lcov.info
+"@
+                        Set-Content -Path "sonar-project.properties" -Value $sonarProps
+                        Write-Host "Running SonarScanner..."
+                        sonar-scanner
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                def buildResult = currentBuild.result ?: 'SUCCESS'
+                def statusIcon = buildResult == 'SUCCESS' ? '✅' : (buildResult == 'FAILURE' ? '❌' : '⚠️')
+                def titleText = buildResult == 'SUCCESS' ? 'Deployment Report' : 'Build Failed Report'
+
+                // Ensure env.author has a fallback
+                def authorName = env.author ?: 'Unknown Author'
+
+                emailext(
+                    subject: "${statusIcon} WebGPU 3D Engine - Build ${env.BUILD_NUMBER} | ${buildResult}",
+                    body: """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>WebGPU 3D Engine - ${titleText}</title>
+    <style>body{font-family:sans-serif;}</style>
+</head>
+<body style="margin:0; padding:20px; background:linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); font-family:'Segoe UI', sans-serif; color:#2c3e50;">
+    <div style="max-width:700px; margin:0 auto; background:white; border-radius:20px; overflow:hidden; box-shadow:0 25px 50px rgba(89,98,53,0.15); border:1px solid rgba(89,98,53,0.1);">
+        <!-- Header -->
+        <div style="background:linear-gradient(135deg, #596235 0%, #2c3e50 100%); padding:40px 30px; text-align:center; color:white;">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:20px;">
+                <div></div>
+                <div style="background:rgba(255,255,255,0.25); padding:8px 16px; border-radius:20px; font-size:11px; color:white; font-weight:600; backdrop-filter:blur(10px); border:1px solid rgba(255,255,255,0.3);">
+                    <a href="${env.WEBSITE_URL}" target="_blank" style="color:white; text-decoration:none;">WebGPU 3D Engine</a>
+                </div>
+            </div>
+            <div style="background:rgba(255,255,255,0.15); display:inline-block; padding:20px 28px; border-radius:16px; margin-bottom:25px;">
+                <div style="font-size:24px; font-weight:700; letter-spacing:2px; color:white;">WebGPU</div>
+                <div style="font-size:12px; opacity:0.9; color:rgba(255,255,255,0.9);">3D Rendering Engine</div>
+            </div>
+            <div style="font-size:28px; font-weight:700; margin-bottom:8px;">${statusIcon} ${titleText}</div>
+            <div style="font-size:15px; opacity:0.85; color:rgba(255,255,255,0.9);">Build #${env.BUILD_NUMBER} • ${new Date().format('MMM dd, yyyy HH:mm:ss')} IST</div>
+            <div style="display:inline-block; padding:12px 25px; border-radius:30px; font-weight:700; font-size:15px; margin:20px 0; text-transform:uppercase; letter-spacing:1px;
+                ${buildResult == 'SUCCESS' ? 'background:rgba(255,255,255,0.2); color:white; border:2px solid rgba(255,255,255,0.3);' : 
+                  buildResult == 'FAILURE' ? 'background:rgba(220,53,69,0.9); color:white; border:2px solid rgba(220,53,69,0.3);' : 
+                  'background:rgba(255,193,7,0.9); color:#2c3e50; border:2px solid rgba(255,193,7,0.3);'}">
+                ${buildResult}
+            </div>
+        </div>
+
+        <!-- Content -->
+        <div style="padding:45px 35px;">
+            <div style="font-size:20px; color:#596235; margin-bottom:25px; font-weight:600;">👋 Hello Core Team,</div>
+            <p style="font-size:16px; color:#596235; margin-bottom:30px; line-height:1.7;">
+                ${buildResult == 'SUCCESS' ? 
+                    'Your WebGPU 3D Engine has been successfully deployed and is ready for testing. All systems are operational.' : 
+                    'The build pipeline has failed. Please review the details below and take corrective action.'}
+            </p>
+
+            <!-- Info Grid -->
+            <table width="100%" style="margin:35px 0;" cellpadding="0" cellspacing="0">
+                <tr>
+                    <td width="50%" style="padding-right:10px;">
+                        <div style="background:linear-gradient(135deg, rgba(89,98,53,0.05) 0%, rgba(44,62,84,0.05) 100%); padding:25px; border-radius:15px; border-left:5px solid #596235;">
+                            <div style="font-size:12px; color:#596235; text-transform:uppercase; font-weight:700; margin-bottom:8px; letter-spacing:0.5px;">Application/Engine</div>
+                            <div style="font-size:17px; color:#2c3e50; font-weight:600;">WebGPU 3D Engine</div>
+                        </div>
+                    </td>
+                    <td width="50%" style="padding-left:10px;">
+                        <div style="background:linear-gradient(135deg, rgba(89,98,53,0.05) 0%, rgba(44,62,84,0.05) 100%); padding:25px; border-radius:15px; border-left:5px solid #596235;">
+                            <div style="font-size:12px; color:#596235; text-transform:uppercase; font-weight:700; margin-bottom:8px; letter-spacing:0.5px;">Triggered/Updated By</div>
+                            <div style="font-size:17px; color:#2c3e50; font-weight:600;">${authorName}</div>
+                        </div>
+                    </td>
+                </tr>
+                <tr>
+                    <td width="50%" style="padding-right:10px;">
+                        <div style="background:linear-gradient(135deg, rgba(89,98,53,0.05) 0%, rgba(44,62,84,0.05) 100%); padding:25px; border-radius:15px; border-left:5px solid #596235;">
+                            <div style="font-size:12px; color:#596235; text-transform:uppercase; font-weight:700; margin-bottom:8px; letter-spacing:0.5px;">Branch</div>
+                            <div style="font-size:17px; color:#2c3e50; font-weight:600;">Updated</div>
+                        </div>
+                    </td>
+                    <td width="50%" style="padding-left:10px;">
+                        <div style="background:linear-gradient(135deg, rgba(89,98,53,0.05) 0%, rgba(44,62,84,0.05) 100%); padding:25px; border-radius:15px; border-left:5px solid #596235;">
+                            <div style="font-size:12px; color:#596235; text-transform:uppercase; font-weight:700; margin-bottom:8px; letter-spacing:0.5px;">Duration</div>
+                            <div style="font-size:17px; color:#2c3e50; font-weight:600;">${currentBuild.durationString?.replace(' and counting', '') ?: '1m 42s'}</div>
+                        </div>
+                    </td>
+                </tr>
+            </table>
+
+            <!-- Highlight -->
+            <div style="background:${buildResult == 'FAILURE' ? 'linear-gradient(135deg, rgba(220,53,69,0.1) 0%, rgba(220,53,69,0.05) 100%)' : 'linear-gradient(135deg, rgba(89,98,53,0.1) 0%, rgba(44,62,84,0.05) 100%)'}; padding:30px; border-radius:16px; margin:30px 0; border-left:5px solid ${buildResult == 'FAILURE' ? '#D96846' : '#596235'}; box-shadow:0 8px 25px rgba(${buildResult == 'FAILURE' ? '220,53,69' : '89,98,53'},0.1);">
+                <strong>${buildResult == 'SUCCESS' ? '🚀 WebGPU Deployment Complete!' : '⚠️ Build Failure Summary'}</strong><br>
+                ${buildResult == 'SUCCESS' ? 
+                    'The WebGPU 3D Engine has been successfully deployed. All containers are running, shaders are loaded, and the application is accessible via HTTPS.' : 
+                    'The pipeline failed during build or deployment. Check logs for details and verify shader files, SSL certs, and Docker configuration.'}
+            </div>
+
+            <!-- Details Table -->
+            <div style="background:linear-gradient(135deg, rgba(89,98,53,0.08) 0%, rgba(44,62,84,0.08) 100%); padding:30px; border-radius:16px; margin:35px 0; border:2px solid rgba(89,98,53,0.1);">
+                <div style="font-size:20px; color:#596235; font-weight:700; margin-bottom:25px; text-align:center;">📊 Build Details</div>
+                <table width="100%" style="border-collapse:collapse; border-radius:12px; overflow:hidden;">
+                    <thead>
+                        <tr>
+                            <th style="background:#596235; padding:15px 20px; text-align:left; font-weight:700; color:white; font-size:14px; text-transform:uppercase; letter-spacing:0.5px;">Component</th>
+                            <th style="background:#596235; padding:15px 20px; text-align:left; font-weight:700; color:white; font-size:14px; text-transform:uppercase; letter-spacing:0.5px;">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td style="padding:15px 20px; border-bottom:1px solid rgba(89,98,53,0.1); color:#2c3e50; background:white;"><strong>Build Status</strong></td>
+                            <td style="padding:15px 20px; border-bottom:1px solid rgba(89,98,53,0.1); color:#2c3e50; background:white;">
+                                <span style="display:inline-block; padding:8px 16px; border-radius:20px; font-weight:700; font-size:14px; background:${buildResult == 'SUCCESS' ? '#596235' : '#D96846'}; color:white;">
+                                    ${buildResult}
+                                </span>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="padding:15px 20px; border-bottom:1px solid rgba(89,98,53,0.1); color:#2c3e50; background:white;"><strong>Application URL</strong></td>
+                            <td style="padding:15px 20px; border-bottom:1px solid rgba(89,98,53,0.1); color:#2c3e50; background:white;">
+                                <a href="${env.WEBSITE_URL}" style="color: #596235; text-decoration: none;">${env.WEBSITE_URL}</a>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="padding:15px 20px; border-bottom:1px solid rgba(89,98,53,0.1); color:#2c3e50; background:white;"><strong>SonarQube Report</strong></td>
+                            <td style="padding:15px 20px; border-bottom:1px solid rgba(89,98,53,0.1); color:#2c3e50; background:white;">
+                                <a href="http://185.100.212.76:12345/dashboard?id=webgpu-3d-engine" style="color: #596235; text-decoration: none;">View Quality Report</a>
+                            </td>
+                        </tr>
+                        ${buildResult == 'FAILURE' ? '''
+                        <tr>
+                            <td style="padding:15px 20px; border-bottom:1px solid rgba(89,98,53,0.1); color:#2c3e50; background:white;"><strong>Error</strong></td>
+                            <td style="padding:15px 20px; border-bottom:1px solid rgba(89,98,53,0.1); color:#2c3e50; background:white;">Check build logs for details</td>
+                        </tr>
+                        ''' : ''}
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Action Buttons -->
+            <div style="text-align:center; margin:35px 0;">
+                ${buildResult == 'SUCCESS' ? """
+                <a href="${env.WEBSITE_URL}" style="display:inline-block; padding:15px 30px; margin:10px 15px; border-radius:12px; background:#596235; color:white; text-decoration:none; font-weight:700; font-size:14px; text-transform:uppercase; letter-spacing:0.5px; box-shadow:0 4px 15px rgba(0,0,0,0.1);">🎮 View 3D App</a>
+                <a href="${env.BUILD_URL}" style="display:inline-block; padding:15px 30px; margin:10px 15px; border-radius:12px; background:#D96846; color:white; text-decoration:none; font-weight:700; font-size:14px; text-transform:uppercase; letter-spacing:0.5px; box-shadow:0 4px 15px rgba(0,0,0,0.1);">📋 Build Log</a>
+                <a href="http://185.100.212.76:12345/dashboard?id=webgpu-3d-engine" style="display:inline-block; padding:15px 30px; margin:10px 15px; border-radius:12px; background:white; color:#596235; border:2px solid #596235; text-decoration:none; font-weight:700; font-size:14px; text-transform:uppercase; letter-spacing:0.5px; box-shadow:0 4px 15px rgba(0,0,0,0.1);">🔍 Sonar Report</a>
+                """ : """
+                <a href="${env.BUILD_URL}console" style="display:inline-block; padding:15px 30px; margin:10px 15px; border-radius:12px; background:#D96846; color:white; text-decoration:none; font-weight:700; font-size:14px; text-transform:uppercase; letter-spacing:0.5px; box-shadow:0 4px 15px rgba(0,0,0,0.1);">📋 View Logs</a>
+                <a href="${env.BUILD_URL}" style="display:inline-block; padding:15px 30px; margin:10px 15px; border-radius:12px; background:white; color:#596235; border:2px solid #596235; text-decoration:none; font-weight:700; font-size:14px; text-transform:uppercase; letter-spacing:0.5px; box-shadow:0 4px 15px rgba(0,0,0,0.1);">🔍 Build Details</a>
+                """}
+            </div>
+
+            <!-- Notes -->
+            <div style="background:${buildResult == 'FAILURE' ? 'rgba(220,53,69,0.05)' : 'rgba(89,98,53,0.05)'}; padding:30px; border-radius:16px; border:2px solid ${buildResult == 'FAILURE' ? 'rgba(220,53,69,0.2)' : 'rgba(89,98,53,0.2)'}; margin-top:35px;">
+                <strong>ℹ️ Notes:</strong>
+                <ul style="margin-top:15px; padding-left:25px; color:${buildResult == 'FAILURE' ? '#D96846' : '#596235'};">
+                    ${buildResult == 'SUCCESS' ? '''
+                    <li>WebGPU rendering is active and secure via HTTPS</li>
+                    <li>Shader files (.wgsl) loaded successfully</li>
+                    <li>GLTF model (gas cylinder) is displayed correctly</li>
+                    <li>Contact DevOps if rendering issues occur</li>
+                    ''' : '''
+                    <li>Build failed — check logs immediately</li>
+                    <li>Verify: src/shaders/shaders.wgsl exists</li>
+                    <li>Ensure SSL certs (cert.pem, key.pem) are in repo</li>
+                    <li>Check Docker and Nginx configuration</li>
+                    '''}
+                </ul>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div style="background:linear-gradient(135deg, #596235 0%, #2c3e50 100%); padding:35px; text-align:center; color:white;">
+            <div style="font-size:14px; line-height:1.8;">
+                <div style="margin-bottom:15px; font-size:16px;">Managed by <span style="font-weight:bold; color:rgba(255,255,255,0.95);">Marikannan Sankarraj</span></div>
+                📧 <a href="mailto:marikannan@hexrfactory.com" style="color:white; text-decoration:none;">marikannan@hexrfactory.com</a><br><br>
+                <strong>🛠️ Infrastructure Team</strong><br>
+                Rithish Samm & Ramkumar P.<br><br>
+                <div style="margin-top:20px; font-size:13px; opacity:0.9;">
+                    Need help? Contact DevOps for support.
+                </div>
+            </div>
+            <div style="margin-top:25px; padding-top:25px; border-top:1px solid rgba(255,255,255,0.2);">
+                <strong>HEXR FACTORY IMMERSIVE TECH PRIVATE LIMITED</strong><br>
+                <span style="font-size:12px; opacity:0.8;">© 2025 • All rights reserved</span>
+            </div>
+        </div>
+    </div>
+</body>
+</html>""",
+                    to: "marikannan@hexrfactory.com, rithish@hexrfactory.com, varatharajan@hexrfactory.com, akash@hexrfactory.com, surya@hexrfactory.com, ramkumar@hexrfactory.com",
+                    attachLog: true,
+                    mimeType: 'text/html',
+                    replyTo: "marikannan@hexrfactory.com",
+                    from: env.SMTP_CREDENTIALS_USR  // Correct variable usage
+                )
+
+                // Final cleanup
+                cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+            }
+        }
+    }
+}

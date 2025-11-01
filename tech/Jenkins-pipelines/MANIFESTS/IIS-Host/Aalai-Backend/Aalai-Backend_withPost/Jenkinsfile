@@ -1,0 +1,390 @@
+pipeline {
+    agent {
+        label 'remote-server-agent'
+    }
+
+    options {
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 30, unit: 'MINUTES')
+        timestamps()
+    }
+
+    triggers {
+        GenericTrigger(
+            genericVariables: [
+                [key: 'ref', value: '$.ref'],
+                [key: 'commit', value: '$.after'],
+                [key: 'author', value: '$.commits[0].author.name']
+            ],
+            causeString: 'Triggered by commit on ${ref} by ${author}',
+            token: 'aalaiStaticBackend',
+            printContributedVariables: true,
+            printPostContent: true,
+            regexpFilterText: '$ref',
+            regexpFilterExpression: '^refs/heads/main$'
+        )
+    }
+
+    environment {
+        GIT_CREDENTIALS = credentials('ramkumarp')
+        DOCKER_COMPOSE = 'docker-compose'
+        COMPOSE_PROJECT_NAME = 'dwinzo-backend'
+        MAIN_CONTAINER = 'aalaiDemoApiBackend'
+        SOCKET_CONTAINER = 'aalaiDemoSocketBackend'
+        MONGO_CONTAINER = 'aalaiDemoMongo'
+        GRAFANA_CONTAINER = 'aalaiDemoGrafana'
+        PROMETHEUS_CONTAINER = 'aalaiDemoPrometheus'
+        MONGO_EXPORTER_CONTAINER = 'aalaiDemoMongoExporter'
+        NETWORK_NAME = 'DwinzoMajor'
+        SMTP_CREDENTIALS = credentials('smtp-credentials-gmail')
+        WEBSITE_URL = 'http://185.100.212.76:9911'
+    }
+
+    stages {
+        stage('Source') {
+            steps {
+                cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+                script {
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: '*/main']],
+                        userRemoteConfigs: [[
+                            url: 'http://185.100.212.76:7778/rithishsamm/aalai-static-backend.git',
+                            credentialsId: env.GIT_CREDENTIALS_ID
+                        ]]
+                    ])
+                }
+            }
+        }
+
+        stage('Build & Clean Old Containers') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Cleaning old containers..."
+                        $containers = "$env:MAIN_CONTAINER", "$env:SOCKET_CONTAINER", "$env:MONGO_CONTAINER", "$env:GRAFANA_CONTAINER", "$env:PROMETHEUS_CONTAINER", "$env:MONGO_EXPORTER_CONTAINER"
+                        foreach ($container in $containers) {
+                            $cid = docker ps -aq -f "name=$container"
+                            if ($cid) {
+                                Write-Host "Stopping and removing container: $container"
+                                docker stop $cid 2>$null
+                                docker rm $cid 2>$null
+                            }
+                        }
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        $env:COMPOSE_PROJECT_NAME = "$env:COMPOSE_PROJECT_NAME"
+                        docker-compose down --remove-orphans 2>$null
+                        Write-Host "Old containers removed."
+                    '''
+
+                    powershell '''
+                        Write-Host "Building all containers..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        $env:COMPOSE_PROJECT_NAME = "$env:COMPOSE_PROJECT_NAME"
+                        docker-compose build --no-cache
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "Docker compose build failed"
+                        }
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy All Services') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Deploying all services..."
+                        $env:COMPOSE_CONVERT_WINDOWS_PATHS=1
+                        $env:COMPOSE_PROJECT_NAME = "$env:COMPOSE_PROJECT_NAME"
+                        docker-compose up -d
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "Docker compose up failed"
+                        }
+                        Write-Host "Waiting for services to start..."
+                        Start-Sleep -Seconds 30
+                        
+                        Write-Host "Checking container status..."
+                        docker ps -a --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}"
+                        
+                        Write-Host "Containers deployed successfully."
+                    '''
+                }
+            }
+        }
+
+        stage('Health Check') {
+            steps {
+                script {
+                    powershell '''
+                        Write-Host "Performing health checks..."
+                        $apiHealth = try { Invoke-WebRequest -Uri "http://185.100.212.76:9911/health" -UseBasicParsing -TimeoutSec 10 } catch { $null }
+                        if ($apiHealth -and $apiHealth.StatusCode -eq 200) {
+                            Write-Host "✅ API Service is healthy"
+                        } else {
+                            Write-Host "⚠️ API Service health check failed"
+                        }
+                        
+                        Write-Host "Service Endpoints:"
+                        Write-Host "API Service: http://185.100.212.76:9911"
+                        Write-Host "Socket Service: http://185.100.212.76:9912"
+                        Write-Host "MongoDB: http://185.100.212.76:9913"
+                        Write-Host "Grafana Dashboard: http://185.100.212.76:5611"
+                        Write-Host "Prometheus: http://185.100.212.76:6711"
+                        Write-Host "Mongo Exporter: http://185.100.212.76:9211"
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                def buildResult = currentBuild.result ?: 'SUCCESS'
+                def statusClass = (buildResult == 'SUCCESS') ? 'success' : (buildResult == 'FAILURE') ? 'failure' : 'warning'
+                def statusIcon = (buildResult == 'SUCCESS') ? '✅' : (buildResult == 'FAILURE') ? '❌' : '⚠️'
+                def buildNumber = env.BUILD_NUMBER ?: 'Unknown'
+                def buildDuration = currentBuild.durationString?.replace(' and counting', '') ?: 'Unknown'
+                def branchName = env.ref ? env.ref.replace('refs/heads/', '') : 'main'
+                def lastCommit = env.commit ? env.commit.substring(0, 7) : 'N/A'
+                def triggerAuthor = env.author ?: 'System'
+                def buildTime = new Date().format('MMM dd, yyyy HH:mm:ss')
+
+                emailext(
+                    subject: "${statusIcon} Aalai Static Backend - Build ${buildNumber} | ${buildResult}",
+                    body: """
+                        <!DOCTYPE html>
+                        <html lang="en">
+                        <head>
+                            <meta charset="UTF-8">
+                            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                            <title>Aalai Static Backend Deployment Report</title>
+                            <style>
+                                body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+                                .container { max-width: 700px; margin: 0 auto; }
+                                .btn { text-decoration: none !important; display: inline-block; }
+                            </style>
+                        </head>
+                        <body style="margin:0; padding:20px; background:linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #2c3e50;">
+                            <div class="container" style="max-width:700px; margin:0 auto; background:white; border-radius:20px; overflow:hidden; box-shadow:0 25px 50px rgba(94,140,125,0.2); border:1px solid rgba(94,140,125,0.3);">
+                                
+                                <!-- Header -->
+                                <div class="header" style="background:linear-gradient(135deg, #5E8C7D 0%, #5A8578 50%, #567F74 100%); padding:40px 30px; text-align:center; color:white; position:relative;">
+                                    <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:20px;">
+                                        <div></div>
+                                        <div class="website-tag" style="background:rgba(255,255,255,0.25); padding:8px 16px; border-radius:20px; font-size:11px; color:white; font-weight:600; backdrop-filter:blur(10px); border:1px solid rgba(255,255,255,0.4);">
+                                            Aalai Static Backend
+                                        </div>
+                                    </div>
+                                    <div class="logo" style="background:rgba(255,255,255,0.2); display:inline-block; padding:20px 28px; border-radius:16px; margin-bottom:25px;">
+                                        <div class="logo-text" style="font-size:24px; font-weight:700; letter-spacing:2px; color:white;">AALAI</div>
+                                        <div class="logo-subtitle" style="font-size:12px; opacity:0.9; color:rgba(255,255,255,0.9);">Static Backend System</div>
+                                    </div>
+                                    <div class="header-title" style="font-size:28px; font-weight:700; margin-bottom:8px; color:white;">${statusIcon} Deployment Report</div>
+                                    <div class="header-subtitle" style="font-size:15px; opacity:0.9; color:rgba(255,255,255,0.95);">Build #${buildNumber} • ${buildTime}</div>
+                                    <div class="status-badge ${statusClass}" style="display:inline-block; padding:12px 25px; border-radius:30px; font-weight:700; font-size:15px; margin:20px 0; text-transform:uppercase; letter-spacing:1px; background:${buildResult == 'SUCCESS' ? 'rgba(94,140,125,0.9)' : 'rgba(248,166,166,0.9)'}; color:white; border:2px solid ${buildResult == 'SUCCESS' ? 'rgba(94,140,125,0.7)' : 'rgba(248,166,166,0.7)'};">
+                                        ${buildResult}
+                                    </div>
+                                </div>
+                        
+                                <!-- Content -->
+                                <div class="content" style="padding:45px 35px;">
+                                    <div class="greeting" style="font-size:20px; color:#5E8C7D; margin-bottom:25px; font-weight:600;">👋 Hello Development Team,</div>
+
+                                    <p class="main-text" style="font-size:16px; color:#6A9184; margin-bottom:30px; line-height:1.7;">
+                                        Your latest Aalai Static Backend deployment has been processed. Here's a comprehensive overview of the build and deployment status.
+                                    </p>
+                        
+                                    <!-- Info Grid -->
+                                    <table width="100%" style="margin:35px 0;" cellpadding="0" cellspacing="0">
+                                        <tr>
+                                            <td width="50%" style="padding-right:10px;">
+                                                <div class="info-card" style="background:linear-gradient(135deg, rgba(94,140,125,0.08) 0%, rgba(94,140,125,0.12) 100%); padding:25px; border-radius:15px; border-left:5px solid #5E8C7D;">
+                                                    <div class="info-label" style="font-size:12px; color:#5E8C7D; text-transform:uppercase; font-weight:700; margin-bottom:8px; letter-spacing:0.5px;">Repository</div>
+                                                    <div class="info-value" style="font-size:17px; color:#2c3e50; font-weight:600;">rithishsamm/aalai-static-backend</div>
+                                                </div>
+                                            </td>
+                                            <td width="50%" style="padding-left:10px;">
+                                                <div class="info-card" style="background:linear-gradient(135deg, rgba(248,166,166,0.08) 0%, rgba(248,166,166,0.12) 100%); padding:25px; border-radius:15px; border-left:5px solid #F8A6A6;">
+                                                    <div class="info-label" style="font-size:12px; color:#F8A6A6; text-transform:uppercase; font-weight:700; margin-bottom:8px; letter-spacing:0.5px;">Triggered By</div>
+                                                    <div class="info-value" style="font-size:17px; color:#2c3e50; font-weight:600;">${triggerAuthor}</div>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                        <tr style="height:20px;"><td colspan="2"></td></tr>
+                                        <tr>
+                                            <td width="50%" style="padding-right:10px;">
+                                                <div class="info-card" style="background:linear-gradient(135deg, rgba(248,166,166,0.08) 0%, rgba(248,166,166,0.12) 100%); padding:25px; border-radius:15px; border-left:5px solid #F8A6A6;">
+                                                    <div class="info-label" style="font-size:12px; color:#F8A6A6; text-transform:uppercase; font-weight:700; margin-bottom:8px; letter-spacing:0.5px;">Branch</div>
+                                                    <div class="info-value" style="font-size:17px; color:#2c3e50; font-weight:600;">${branchName}</div>
+                                                </div>
+                                            </td>
+                                            <td width="50%" style="padding-left:10px;">
+                                                <div class="info-card" style="background:linear-gradient(135deg, rgba(94,140,125,0.08) 0%, rgba(94,140,125,0.12) 100%); padding:25px; border-radius:15px; border-left:5px solid #5E8C7D;">
+                                                    <div class="info-label" style="font-size:12px; color:#5E8C7D; text-transform:uppercase; font-weight:700; margin-bottom:8px; letter-spacing:0.5px;">Duration</div>
+                                                    <div class="info-value" style="font-size:17px; color:#2c3e50; font-weight:600;">${buildDuration}</div>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    </table>
+                        
+                                    <!-- Highlight -->
+                                    <div class="highlight" style="background:linear-gradient(135deg, rgba(94,140,125,0.12) 0%, rgba(94,140,125,0.08) 100%); padding:30px; border-radius:16px; margin:30px 0; border-left:5px solid #5E8C7D; box-shadow:0 8px 25px rgba(94,140,125,0.15);">
+                                        <strong style="color:#5E8C7D;">🎯 Deployment Summary:</strong><br>
+                                        <span style="color:#2c3e50;">The Aalai Static Backend system has been ${buildResult == 'SUCCESS' ? 'successfully deployed' : 'deployment failed'}. ${buildResult == 'SUCCESS' ? 'All containers are running optimally on the DwinzoMajor network.' : 'Please check the build logs for details.'}</span>
+                                    </div>
+                        
+                                    <!-- Details Table -->
+                                    <div class="details-section" style="background:linear-gradient(135deg, rgba(94,140,125,0.06) 0%, rgba(94,140,125,0.10) 100%); padding:30px; border-radius:16px; margin:35px 0; border:2px solid rgba(94,140,125,0.2);">
+                                        <div class="details-title" style="font-size:20px; color:#5E8C7D; font-weight:700; margin-bottom:25px; text-align:center;">📊 Build Details</div>
+                                        <table class="details-table" width="100%" style="border-collapse:collapse; border-radius:12px; overflow:hidden;">
+                                            <thead>
+                                                <tr>
+                                                    <th style="background:#5E8C7D; padding:15px 20px; text-align:left; font-weight:700; color:white; font-size:14px; text-transform:uppercase; letter-spacing:0.5px;">Component</th>
+                                                    <th style="background:#5E8C7D; padding:15px 20px; text-align:left; font-weight:700; color:white; font-size:14px; text-transform:uppercase; letter-spacing:0.5px;">Details</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                <tr>
+                                                    <td style="padding:15px 20px; border-bottom:1px solid rgba(94,140,125,0.2); color:#2c3e50; background:white;"><strong>Application Name</strong></td>
+                                                    <td style="padding:15px 20px; border-bottom:1px solid rgba(94,140,125,0.2); color:#2c3e50; background:white;">Aalai Static Backend</td>
+                                                </tr>
+                                                <tr>
+                                                    <td style="padding:15px 20px; border-bottom:1px solid rgba(94,140,125,0.2); color:#2c3e50; background:white;"><strong>Main Container</strong></td>
+                                                    <td style="padding:15px 20px; border-bottom:1px solid rgba(94,140,125,0.2); color:#2c3e50; background:white;">aalaiDemoApiBackend</td>
+                                                </tr>
+                                                <tr>
+                                                    <td style="padding:15px 20px; border-bottom:1px solid rgba(94,140,125,0.2); color:#2c3e50; background:white;"><strong>Socket Container</strong></td>
+                                                    <td style="padding:15px 20px; border-bottom:1px solid rgba(94,140,125,0.2); color:#2c3e50; background:white;">aalaiDemoSocketBackend</td>
+                                                </tr>
+                                                <tr>
+                                                    <td style="padding:15px 20px; border-bottom:1px solid rgba(94,140,125,0.2); color:#2c3e50; background:white;"><strong>Network</strong></td>
+                                                    <td style="padding:15px 20px; border-bottom:1px solid rgba(94,140,125,0.2); color:#2c3e50; background:white;">DwinzoMajor</td>
+                                                </tr>
+                                                <tr>
+                                                    <td style="padding:15px 20px; border-bottom:1px solid rgba(94,140,125,0.2); color:#2c3e50; background:white;"><strong>Build Status</strong></td>
+                                                    <td style="padding:15px 20px; border-bottom:1px solid rgba(94,140,125,0.2); color:#2c3e50; background:white;">
+                                                        <span class="status-badge" style="display:inline-block; padding:8px 16px; border-radius:20px; font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:0.5px; background:${buildResult == 'SUCCESS' ? 'rgba(94,140,125,0.2)' : 'rgba(248,166,166,0.2)'}; color:${buildResult == 'SUCCESS' ? '#5E8C7D' : '#F8A6A6'}; border:1px solid ${buildResult == 'SUCCESS' ? 'rgba(94,140,125,0.4)' : 'rgba(248,166,166,0.4)'};">
+                                                            ${buildResult}
+                                                        </span>
+                                                    </td>
+                                                </tr>
+                                                <tr>
+                                                    <td style="padding:15px 20px; border-bottom:1px solid rgba(94,140,125,0.2); color:#2c3e50; background:white;"><strong>Last Commit</strong></td>
+                                                    <td style="padding:15px 20px; border-bottom:1px solid rgba(94,140,125,0.2); color:#2c3e50; background:white;">${lastCommit}</td>
+                                                </tr>
+                                                <tr>
+                                                    <td style="padding:15px 20px; color:#2c3e50; background:white;"><strong>Build Time</strong></td>
+                                                    <td style="padding:15px 20px; color:#2c3e50; background:white;">${buildTime} UTC</td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                        
+                                    <!-- Services Section -->
+                                    <div class="services-section" style="background:linear-gradient(135deg, rgba(248,166,166,0.06) 0%, rgba(248,166,166,0.10) 100%); padding:30px; border-radius:16px; margin:35px 0; border:2px solid rgba(248,166,166,0.2);">
+                                        <div class="services-title" style="font-size:20px; color:#F8A6A6; font-weight:700; margin-bottom:25px; text-align:center;">🖥️ Deployed Services</div>
+                                        <div style="display:flex; flex-wrap:wrap; gap:15px; justify-content:space-between;">
+                                            <div class="service-card" style="background:white; padding:20px; border-radius:12px; text-align:center; flex:1; min-width:120px; border:1px solid rgba(94,140,125,0.3); box-shadow:0 2px 8px rgba(94,140,125,0.1);">
+                                                <div style="font-size:24px; margin-bottom:10px;">🌐</div>
+                                                <div style="font-size:14px; font-weight:600; color:#2c3e50; margin-bottom:5px;">API Service</div>
+                                                <div style="font-size:12px; color:#5E8C7D;">Port: 9911</div>
+                                            </div>
+                                            <div class="service-card" style="background:white; padding:20px; border-radius:12px; text-align:center; flex:1; min-width:120px; border:1px solid rgba(248,166,166,0.3); box-shadow:0 2px 8px rgba(248,166,166,0.1);">
+                                                <div style="font-size:24px; margin-bottom:10px;">🔌</div>
+                                                <div style="font-size:14px; font-weight:600; color:#2c3e50; margin-bottom:5px;">Socket Service</div>
+                                                <div style="font-size:12px; color:#F8A6A6;">Port: 9912</div>
+                                            </div>
+                                            <div class="service-card" style="background:white; padding:20px; border-radius:12px; text-align:center; flex:1; min-width:120px; border:1px solid rgba(94,140,125,0.3); box-shadow:0 2px 8px rgba(94,140,125,0.1);">
+                                                <div style="font-size:24px; margin-bottom:10px;">🗄️</div>
+                                                <div style="font-size:14px; font-weight:600; color:#2c3e50; margin-bottom:5px;">MongoDB</div>
+                                                <div style="font-size:12px; color:#5E8C7D;">Port: 9913</div>
+                                            </div>
+                                            <div class="service-card" style="background:white; padding:20px; border-radius:12px; text-align:center; flex:1; min-width:120px; border:1px solid rgba(248,166,166,0.3); box-shadow:0 2px 8px rgba(248,166,166,0.1);">
+                                                <div style="font-size:24px; margin-bottom:10px;">📊</div>
+                                                <div style="font-size:14px; font-weight:600; color:#2c3e50; margin-bottom:5px;">Grafana</div>
+                                                <div style="font-size:12px; color:#F8A6A6;">Port: 5611</div>
+                                            </div>
+                                            <div class="service-card" style="background:white; padding:20px; border-radius:12px; text-align:center; flex:1; min-width:120px; border:1px solid rgba(94,140,125,0.3); box-shadow:0 2px 8px rgba(94,140,125,0.1);">
+                                                <div style="font-size:24px; margin-bottom:10px;">📈</div>
+                                                <div style="font-size:14px; font-weight:600; color:#2c3e50; margin-bottom:5px;">Prometheus</div>
+                                                <div style="font-size:12px; color:#5E8C7D;">Port: 6711</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                        
+                                    <!-- Action Buttons -->
+                                    <div class="actions" style="text-align:center; margin:35px 0;">
+                                        <a href="http://185.100.212.76:9911" class="btn btn-success" style="display:inline-block; padding:15px 30px; margin:10px 15px; border-radius:12px; background:#5E8C7D; color:white; text-decoration:none; font-weight:700; font-size:14px; text-transform:uppercase; letter-spacing:0.5px; box-shadow:0 4px 15px rgba(94,140,125,0.3);">🌐 View API Service</a>
+                                        <a href="${env.BUILD_URL}console" class="btn btn-primary" style="display:inline-block; padding:15px 30px; margin:10px 15px; border-radius:12px; background:#F8A6A6; color:white; text-decoration:none; font-weight:700; font-size:14px; text-transform:uppercase; letter-spacing:0.5px; box-shadow:0 4px 15px rgba(248,166,166,0.3);">📋 View Build Log</a>
+                                        <a href="http://185.100.212.76:5611" class="btn btn-secondary" style="display:inline-block; padding:15px 30px; margin:10px 15px; border-radius:12px; background:white; color:#5E8C7D; border:2px solid #5E8C7D; text-decoration:none; font-weight:700; font-size:14px; text-transform:uppercase; letter-spacing:0.5px; box-shadow:0 4px 15px rgba(0,0,0,0.1);">📊 Grafana Dashboard</a>
+                                    </div>
+                        
+                                    <!-- Notes -->
+                                    <div class="notes-section" style="background:rgba(94,140,125,0.08); padding:30px; border-radius:16px; border:2px solid rgba(94,140,125,0.2); margin-top:35px;">
+                                        <strong style="color:#5E8C7D;">ℹ️ Important Notes:</strong>
+                                        <ul style="margin-top:15px; padding-left:25px; color:#5E8C7D;">
+                                            <li>The Aalai Static Backend application deployment is ${buildResult == 'SUCCESS' ? 'complete and live' : 'failed'}</li>
+                                            <li>All Docker containers are configured to run on DwinzoMajor network</li>
+                                            <li>API, Socket, MongoDB, Grafana, and Prometheus services are ${buildResult == 'SUCCESS' ? 'operational' : 'not deployed'}</li>
+                                            <li>For any issues, contact the DevOps team immediately</li>
+                                        </ul>
+                                    </div>
+                                </div>
+                        
+                                <!-- Footer -->
+                                <div class="footer" style="background:linear-gradient(135deg, #5E8C7D 0%, #5A8578 50%, #567F74 100%); padding:35px; text-align:center; color:white;">
+                                    <div class="footer-content" style="font-size:14px; line-height:1.8;">
+                                        <div class="product-manager" style="margin-bottom:15px; font-size:16px;">This product is managed by <span class="name" style="font-weight:bold; color:rgba(255,255,255,0.95);">Marikannan Sankarraj</span></div>
+                                        📧 <a href="mailto:marikannan@hexrfactory.com" style="color:rgba(255,255,255,0.9); text-decoration:none;">marikannan@hexrfactory.com</a><br><br>
+                                        <strong>🛠️ Infrastructure Engineering Team</strong><br>
+                                        <span style="opacity:0.9;">Rithish Samm & Ramkumar P.</span><br><br>
+                                        <div style="margin-top:20px; font-size:13px; opacity:0.8;">
+                                            Need help? Contact our DevOps team for technical support or deployment assistance.
+                                        </div>
+                                    </div>
+                                    <div class="company-info" style="margin-top:25px; padding-top:25px; border-top:1px solid rgba(255,255,255,0.2);">
+                                        <strong>HEXR FACTORY IMMERSIVE TECH PRIVATE LIMITED</strong><br>
+                                        <span style="font-size:12px; opacity:0.8;">© 2025 • All rights reserved • Innovative solutions for the future</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </body>
+                        </html>
+                        """,
+                    to: "marikannan@hexrfactory.com, rithish@hexrfactory.com, sabarinathan@hexrfactory.com, nivetha@hexrfactory.com, ramkumar@hexrfactory.com",
+                    attachLog: true,
+                    mimeType: 'text/html',
+                    replyTo: "marikannan@hexrfactory.com",
+                    from: "${env.SMTP_CREDENTIALS_USR ?: 'noreply@hexrfactory.com'}"
+                )
+
+                // Final cleanup
+                cleanWs(deleteDirs: true, disableDeferredWipeout: true)
+            }
+        }
+
+        success {
+            powershell '''
+                Write-Host "✅ Aalai Static Backend Pipeline completed successfully!"
+                Write-Host "Build Number: $env:BUILD_NUMBER"
+                Write-Host "API Service: http://185.100.212.76:9911"
+                Write-Host "Socket Service: http://185.100.212.76:9912"
+                Write-Host "Grafana Dashboard: http://185.100.212.76:5611"
+                Write-Host "Triggered by: $env:author"
+            '''
+        }
+
+        failure {
+            powershell '''
+                Write-Host "❌ Aalai Static Backend Pipeline failed!"
+                Write-Host "Check logs for details"
+                Write-Host "Build Number: $env:BUILD_NUMBER"
+                Write-Host "Current container status:"
+                docker ps -a
+            '''
+        }
+    }
+}
